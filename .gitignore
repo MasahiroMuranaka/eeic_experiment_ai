@@ -1,0 +1,14 @@
+# 仮想環境フォルダを除外
+.venv/
+venv/
+env/
+
+# Pythonのコンパイル済みファイルを除外
+__pycache__/
+*.pyc
+
+# VSCodeの設定ファイル
+.vscode/
+
+# Macの不要ファイル
+.DS_Store
