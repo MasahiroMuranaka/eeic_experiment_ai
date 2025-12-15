@@ -188,7 +188,6 @@ def compute_features(tracked_objects, frame_idx, fps, prev_state, frame_height, 
             'w': w, 'h': h, 
             'vx': round(vx, 4), 'vy': round(vy, 4), 'speed': round(speed, 4),
             'est_depth': round(est_depth, 4),
-            # ★追加: カメラの動き情報
             'ego_vx': ego_vx, 'ego_vy': ego_vy
         }
         rows.append(row)
@@ -211,7 +210,6 @@ def setup_video_io(config):
     return cap, out, width, height, fps
 
 def write_csv_header(csv_path):
-    # ヘッダーに ego_vx, ego_vy を追加
     header = ['frame','time','id','class_id','conf','x1','y1','x2','y2','cx','cy','w','h',
               'vx','vy','speed','est_depth', 'ego_vx', 'ego_vy']
     os.makedirs(os.path.dirname(csv_path), exist_ok=True)
@@ -223,7 +221,6 @@ def append_rows_to_csv(csv_path, rows):
     if not rows:
         return
     fieldnames = list(rows[0].keys())
-    # 追記モードで複数行をまとめて書く
     with open(csv_path, 'a', newline='', encoding='utf-8') as f:
         writer = csv.DictWriter(f, fieldnames=fieldnames)
         writer.writerows(rows)

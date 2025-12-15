@@ -94,7 +94,7 @@ pandas
     - `prev_state` を用いた速度計算実装（フレーム差分）。
     - スクリプト基準の `resolve_path()` を導入。
 
-- mv4 (試作: `mv4_pre.py`)
+- mv4 (試作: `mv4.py`)
   - 目的: 被写体の動きを補正するため、カメラの自己運動（ego motion, 背景の流れ）を推定してCSVに付与する。
   - 高レベル実装:
     - 背景特徴点の抽出（`goodFeaturesToTrack`）、人物領域のマスク除外。
