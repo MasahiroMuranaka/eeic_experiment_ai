@@ -1,0 +1,15 @@
+[project]
+name = "predict-area"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "lap>=0.5.12",
+    "numpy>=2.3.5",
+    "opencv-python>=4.11.0.86",
+    "pyyaml>=6.0.3",
+    "torch>=2.9.1",
+    "tqdm>=4.67.1",
+    "ultralytics>=8.3.237",
+]
