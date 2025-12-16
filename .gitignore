@@ -13,4 +13,3 @@ __pycache__/
 # Macの不要ファイル
 .DS_Store
 # ignore vendored / embedded repo
-predict_area/Depth-Anything-V2/
