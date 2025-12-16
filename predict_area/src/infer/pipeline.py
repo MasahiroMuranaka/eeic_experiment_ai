@@ -7,6 +7,7 @@ import argparse
 from collections import deque
 from typing import Dict, Optional, Tuple
 
+import json
 import cv2
 import numpy as np
 import torch
@@ -49,7 +50,7 @@ def run_inference(
     device: torch.device,
     safety_model: SafetyNet,
     out_video: str = "",
-    out_csv: str = "",
+    out_json: str = "",
     show: bool = False,
     max_frames: int = 0,
     frames_dir: str = "",
@@ -132,15 +133,17 @@ def run_inference(
         fourcc = cv2.VideoWriter_fourcc(*"mp4v")
         writer = cv2.VideoWriter(out_video, fourcc, fps, (width, height))
 
-    csv_f = None
-    if out_csv:
-        os.makedirs(os.path.dirname(out_csv) or ".", exist_ok=True)
-        csv_f = open(out_csv, "w", encoding="utf-8")
-        csv_f.write("frame," + ",".join([f"p{k}" for k in range(K)]) + "\n")
+    json_f = None
+    if out_json:
+        os.makedirs(os.path.dirname(out_json) or ".", exist_ok=True)
+        json_f = open(out_json, "w", encoding="utf-8")
+        ## csv_f.write("frame," + ",".join([f"p{k}" for k in range(K)]) + "\n")
 
     frame_idx = 0
+    infer_result = {}
     try:
         while True:
+            frame_name = f"{frame_idx}.json"
             if frame_iter is None:
                 ret, frame = cap.read()
                 if not ret:
@@ -236,8 +239,9 @@ def run_inference(
                     cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2
                 )
                 out_frame = draw_prob_bar(out_frame, p, x0=20, y0=40, w=360, h=14)
-                if csv_f is not None:
-                    csv_f.write(str(frame_idx) + "," + ",".join([f"{float(v):.6f}" for v in p]) + "\n")
+                if json_f is not None:
+                    ## csv_f.write(str(frame_idx) + "," + ",".join([f"{float(v):.6f}" for v in p]) + "\n")
+                    infer_result[frame_name] = [float(v) for v in p]
 
             if writer is not None:
                 writer.write(out_frame)
@@ -257,16 +261,17 @@ def run_inference(
             cap.release()
         if writer is not None:
             writer.release()
-        if csv_f is not None:
-            csv_f.close()
+        if json_f is not None:
+            json.dump(infer_result, json_f, indent=3)
+            json_f.close()
         if show:
             cv2.destroyAllWindows()
 
     print("[infer] done.")
     if out_video:
         print(f"[infer] wrote video: {out_video}")
-    if out_csv:
-        print(f"[infer] wrote csv: {out_csv}")
+    if out_json:
+        print(f"[infer] wrote json: {out_json}")
 
 
 @torch.no_grad()
