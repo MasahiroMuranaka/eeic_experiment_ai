@@ -108,7 +108,18 @@ def main():
     K = int(ds.K)
 
     device = torch.device(cfg.device if torch.cuda.is_available() else "cpu")
-    model = SafetyNet(in_dim=in_dim, K=K).to(device)
+    model_kwargs = {
+        "emb_dim": int(getattr(cfg, "emb_dim", 128)),
+        "temporal": str(getattr(cfg, "temporal_model", "gru")),
+        "rnn_hidden": int(getattr(cfg, "rnn_hidden", 256)),
+        "rnn_layers": int(getattr(cfg, "rnn_layers", 2)),
+        "tf_layers": int(getattr(cfg, "tf_layers", 2)),
+        "tf_nhead": int(getattr(cfg, "tf_nhead", 4)),
+        "tf_ff": int(getattr(cfg, "tf_ff", 512)),
+        "tf_dropout": float(getattr(cfg, "tf_dropout", 0.1)),
+        "tf_norm_first": bool(getattr(cfg, "tf_norm_first", True)),
+    }
+    model = SafetyNet(in_dim=in_dim, K=K, **model_kwargs).to(device)
 
     opt = torch.optim.AdamW(model.parameters(), lr=cfg.lr, weight_decay=cfg.weight_decay)
 
@@ -131,11 +142,11 @@ def main():
             torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
             opt.step()
 
-            l = float(loss.item())
-            running.append(l)
+            loss_val = float(loss.item())
+            running.append(loss_val)
 
             # show batch loss and epoch mean
-            pbar.set_postfix(loss=f"{l:.4f}", mean=f"{np.mean(running):.4f}")
+            pbar.set_postfix(loss=f"{loss_val:.4f}", mean=f"{np.mean(running):.4f}")
 
         print(f"[train] epoch {epoch:03d} mean_loss={np.mean(running):.6f}")
 
@@ -146,6 +157,7 @@ def main():
             "cfg": cfg.__dict__,
             "in_dim": in_dim,
             "K": K,
+            "model_kwargs": model_kwargs,
             "npz_files": npz_paths,
         },
         args.out_ckpt,

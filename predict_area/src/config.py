@@ -1,5 +1,4 @@
 from dataclasses import dataclass, asdict
-import yaml
 from typing import Any, Dict
 
 
@@ -47,6 +46,22 @@ class SafetyConfig:
     epochs: int = 20
     device: str = "cuda"
 
+    # ===== Model (SafetyNet) =====
+    # temporal encoder: "gru" or "transformer"
+    temporal_model: str = "gru"
+    emb_dim: int = 128
+
+    # --- GRU params ---
+    rnn_hidden: int = 256
+    rnn_layers: int = 2
+
+    # --- Transformer params ---
+    tf_layers: int = 2
+    tf_nhead: int = 4
+    tf_ff: int = 512
+    tf_dropout: float = 0.1
+    tf_norm_first: bool = True
+
     # ===== Misc =====
     seed: int = 42
     eps: float = 1e-6
@@ -65,11 +80,23 @@ class SafetyConfig:
 
 
 def save_config(path: str, cfg: SafetyConfig) -> None:
+    try:
+        import yaml  # type: ignore
+    except ModuleNotFoundError as e:
+        raise ModuleNotFoundError(
+            "PyYAML が見つかりません。`pip install pyyaml` もしくは `uv sync` で依存関係を入れてください。"
+        ) from e
     with open(path, "w", encoding="utf-8") as f:
         yaml.safe_dump(asdict(cfg), f, sort_keys=False, allow_unicode=True)
 
 
 def load_config(path: str) -> SafetyConfig:
+    try:
+        import yaml  # type: ignore
+    except ModuleNotFoundError as e:
+        raise ModuleNotFoundError(
+            "PyYAML が見つかりません。`pip install pyyaml` もしくは `uv sync` で依存関係を入れてください。"
+        ) from e
     with open(path, "r", encoding="utf-8") as f:
         d: Dict[str, Any] = yaml.safe_load(f)
     return SafetyConfig(**d)
