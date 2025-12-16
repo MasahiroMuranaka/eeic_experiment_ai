@@ -116,6 +116,7 @@ python -m src.infer.cli \
 
 - **`X`**: `[B, T, Nmax, F]`（float32）
   - `T`: 過去フレーム長（入力系列長）
+  - `B`: バッチサイズ
   - `Nmax`: 1フレーム内で使う最大人数（近い順に上位）
   - `F`: 1人あたりの特徴量次元
 - **`M`**: `[N, T, Nmax]`（bool）
@@ -130,6 +131,27 @@ python -m src.infer.cli \
 - `+ pose(J3)`（`J*3` のフラット 3D 擬似骨格）
 - `+ dpose(J3)`（`use_pose_delta` のとき）
 - `+ conf(J)`（キーポイント信頼度）
+
+---
+
+### Depth-Anything-V2 を “絶対深度（meters）” で使う（metric depth）
+同梱の `Depth-Anything-V2/metric_depth/` には **絶対深度（meters）を直接出すモデル**が用意されています。  
+使うには metric depth 用 checkpoint を `predict_area/checkpoints/` に置いて、`config.yaml` を以下のように指定してください。
+
+- **Indoor（推奨）**: `depth_anything_v2_metric_hypersim_<encoder>.pth`（max_depth=20 推奨）
+- **Outdoor**: `depth_anything_v2_metric_vkitti_<encoder>.pth`（max_depth=80 推奨）
+
+`config.yaml` 例（Indoor）:
+
+```yaml
+depth_mode: metric
+depth_anything_encoder: vitl
+depth_anything_metric_dataset: hypersim
+depth_anything_max_depth: 20
+# depth_anything_ckpt: checkpoints/depth_anything_v2_metric_hypersim_vitl.pth
+```
+
+※ checkpoint は `Depth-Anything-V2/metric_depth/README.md` にある配布先から取得し、ファイル名を上の規約に合わせて配置してください。
 
 ---
 

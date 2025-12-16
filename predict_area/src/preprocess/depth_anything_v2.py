@@ -18,7 +18,6 @@ from preprocess.camera import estimate_root_xyz_from_bbox
 # input_size default = 518
 # See: https://github.com/DepthAnything/Depth-Anything-V2 (Usage section)
 # and depth_anything_v2/dpt.py (infer_image signature)
-# :contentReference[oaicite:2]{index=2}
 _MODEL_CONFIGS = {
     "vits": {"encoder": "vits", "features": 64, "out_channels": [48, 96, 192, 384]},
     "vitb": {"encoder": "vitb", "features": 128, "out_channels": [96, 192, 384, 768]},
@@ -27,24 +26,34 @@ _MODEL_CONFIGS = {
 }
 
 
-def _ensure_depth_anything_repo_on_path() -> str:
+def _ensure_depth_anything_repo_on_path(use_metric_depth: bool) -> str:
     """
     同梱している `Depth-Anything-V2/` を import 可能にするために sys.path を調整する。
     - 事前に `DEPTH_ANYTHING_V2_REPO` を指定すればそちらを優先
+    - use_metric_depth=True のときは `Depth-Anything-V2/metric_depth` を優先して import する
     """
     repo_dir = os.environ.get(
         "DEPTH_ANYTHING_V2_REPO",
         os.path.abspath(os.path.join(os.path.dirname(__file__), "../../Depth-Anything-V2")),
     )
+    metric_dir = os.path.join(repo_dir, "metric_depth")
+
+    # sys.path は先頭ほど優先されるので、metric_depth を使う場合は metric_dir を最優先にする
+    if use_metric_depth and metric_dir not in sys.path:
+        sys.path.insert(0, metric_dir)
+
     if repo_dir not in sys.path:
-        sys.path.insert(0, repo_dir)
+        # metric_dir が先頭にあるなら、その“次”に repo_dir を入れて優先順位を崩さない
+        if use_metric_depth and len(sys.path) > 0 and sys.path[0] == metric_dir:
+            sys.path.insert(1, repo_dir)
+        else:
+            sys.path.insert(0, repo_dir)
     return repo_dir
 
 
 def _auto_device() -> torch.device:
     # DepthAnythingV2.image2tensor internally uses:
     # cuda -> mps -> cpu
-    # :contentReference[oaicite:3]{index=3}
     if torch.cuda.is_available():
         return torch.device("cuda")
     if torch.backends.mps.is_available():
@@ -95,7 +104,6 @@ class DepthAnythingV2DepthEstimator:
     """
     Depth Anything V2 adapter:
       - depth_map = model.infer_image(frame_bgr, input_size=518)  -> HxW float (relative or metric depending on ckpt)
-        :contentReference[oaicite:4]{index=4}
       - optionally calibrate relative depth to meters using bbox heuristic z (EMA scale)
     """
 
@@ -103,21 +111,49 @@ class DepthAnythingV2DepthEstimator:
         self.cfg = cfg
         self.device = _auto_device()
 
+        # depth_mode で "metric" を指定できるようにする（既存の "midas" 互換も維持）
+        depth_mode = str(cfg_get(cfg, "depth_mode", "bbox")).lower()
+        self.use_metric_depth = bool(cfg_get(cfg, "depth_anything_metric", False)) or depth_mode in (
+            "metric",
+            "metric_depth",
+            "depth_anything_metric",
+            "dav2_metric",
+            "absolute",
+            "abs",
+        )
+
         # SafetyConfig には項目がないので cfg_get で “存在すれば使う” にしています
         self.encoder = str(cfg_get(cfg, "depth_anything_encoder", "vits"))
         self.input_size = int(cfg_get(cfg, "depth_anything_input_size", 518))
-        self.ckpt_path = str(cfg_get(cfg, "depth_anything_ckpt", f"checkpoints/depth_anything_v2_{self.encoder}.pth"))
+
+        # metric depth 用のデフォルト
+        self.metric_dataset = str(cfg_get(cfg, "depth_anything_metric_dataset", "hypersim")).lower()
+        default_max_depth = 20.0 if self.metric_dataset in ("hypersim", "indoor", "indoor_hypersim") else 80.0
+        self.max_depth = float(cfg_get(cfg, "depth_anything_max_depth", default_max_depth))
+
+        default_ckpt = (
+            f"checkpoints/depth_anything_v2_metric_{self.metric_dataset}_{self.encoder}.pth"
+            if self.use_metric_depth
+            else f"checkpoints/depth_anything_v2_{self.encoder}.pth"
+        )
+        self.ckpt_path = str(cfg_get(cfg, "depth_anything_ckpt", default_ckpt))
 
         # 相対深度→m へスケール合わせをするか（デフォルト True）
-        self.enable_calibration = bool(cfg_get(cfg, "depth_anything_calibrate_to_meters", True))
+        # metric depth の場合は meters を直接出すので、キャリブレーションは無効化する
+        self.enable_calibration = (
+            False
+            if self.use_metric_depth
+            else bool(cfg_get(cfg, "depth_anything_calibrate_to_meters", True))
+        )
         self.calib_momentum = float(cfg_get(cfg, "depth_anything_calib_momentum", 0.95))  # EMA
         self.eps = float(cfg_get(cfg, "eps", 1e-6))
 
         self._state = DepthCalibState(use_inverse=False, scale_ema=1.0)
 
         try:
-            _ensure_depth_anything_repo_on_path()
-            from depth_anything_v2.dpt import DepthAnythingV2  # official repo module
+            _ensure_depth_anything_repo_on_path(use_metric_depth=self.use_metric_depth)
+            # metric_depth を優先 sys.path に入れることで、DepthAnythingV2(max_depth=...) を利用可能にする
+            from depth_anything_v2.dpt import DepthAnythingV2  # type: ignore
         except Exception as e:
             raise RuntimeError(
                 "Cannot import DepthAnythingV2. You likely need to clone Depth-Anything-V2 and "
@@ -128,20 +164,30 @@ class DepthAnythingV2DepthEstimator:
             raise ValueError(f"Unsupported encoder: {self.encoder}. Choose one of {list(_MODEL_CONFIGS.keys())}")
 
         if not os.path.exists(self.ckpt_path):
+            if self.use_metric_depth:
+                raise FileNotFoundError(
+                    f"DepthAnythingV2 *metric* checkpoint not found: {self.ckpt_path}\n"
+                    "Download a metric-depth checkpoint from Depth-Anything-V2/metric_depth/README.md and "
+                    "put it under ./checkpoints (predict_area/checkpoints).\n"
+                    "Example (indoor): checkpoints/depth_anything_v2_metric_hypersim_vitl.pth\n"
+                    "Example (outdoor): checkpoints/depth_anything_v2_metric_vkitti_vitl.pth\n"
+                )
             raise FileNotFoundError(
                 f"DepthAnythingV2 checkpoint not found: {self.ckpt_path}\n"
                 "Per official README, download the checkpoint and place it under ./checkpoints.\n"
                 "Example: checkpoints/depth_anything_v2_vits.pth"
             )
 
-        self.model = DepthAnythingV2(**_MODEL_CONFIGS[self.encoder])
+        model_kwargs = dict(_MODEL_CONFIGS[self.encoder])
+        if self.use_metric_depth:
+            model_kwargs["max_depth"] = float(self.max_depth)
+        self.model = DepthAnythingV2(**model_kwargs)
         sd = torch.load(self.ckpt_path, map_location="cpu")
         self.model.load_state_dict(sd)
         self.model = self.model.to(self.device).eval()
 
     def infer_depth_map(self, frame_bgr: np.ndarray) -> np.ndarray:
         # infer_image(raw_image, input_size=518) returns HxW depth map (numpy)
-        # :contentReference[oaicite:5]{index=5}
         depth = self.model.infer_image(frame_bgr, input_size=self.input_size)
         depth = depth.astype(np.float32)
         return depth
@@ -242,6 +288,13 @@ class DepthAnythingV2DepthEstimator:
         d_med = _median_depth_in_bbox(depth_map, box_xyxy)
         if not np.isfinite(d_med):
             return float(fallback_z_m)
+
+        # metric depth の場合、depth_map は meters なので中央値をそのまま z として使う
+        if self.use_metric_depth and not self.enable_calibration:
+            z = float(d_med)
+            if not np.isfinite(z) or z <= 0:
+                return float(fallback_z_m)
+            return z
 
         s = float(self._state.scale_ema)
         if self._state.use_inverse:

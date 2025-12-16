@@ -58,6 +58,11 @@
 - **主要クラス**
   - **`SafetyConfig`**: bin数 `K`、入力長 `T`、未来長 `H`、最大人数 `Nmax`、距離閾値 `D`、YOLO設定、Depth設定、学習設定などを保持。
     - **重要**: 人物選別の距離閾値は `D`（m）。
+    - **Depth（新）**:
+      - `depth_mode: "bbox" | "midas" | "metric"`
+      - `depth_anything_metric_dataset: "hypersim" | "vkitti"`（絶対深度モデル種別）
+      - `depth_anything_max_depth`（hypersim推奨20, vkitti推奨80）
+      - `depth_anything_ckpt`（checkpointパス。未指定なら命名規則から自動）
     - **モデル設定（新）**: `SafetyNet` の構成（GRU / TransformerEncoder など）もここで切り替える。
       - `temporal_model`: `"gru"` or `"transformer"`（時系列エンコーダの種類）
       - `emb_dim`: 人物特徴を埋め込みに落とす次元（E）
@@ -68,6 +73,25 @@
   - **`load_config(path)`**: YAML から `SafetyConfig` を復元。
 
 ---
+
+### 絶対深度（meters）でDepth-Anything-V2を使う方法（要checkpoint）
+`Depth-Anything-V2/metric_depth/README.md` にある **metric depth checkpoint** を `predict_area/checkpoints/` に置いてください。
+
+- **Indoor（推奨）**:
+  - `checkpoints/depth_anything_v2_metric_hypersim_<encoder>.pth`
+  - `<encoder>` は `vits|vitb|vitl`（例: `vitl`）
+- **Outdoor**:
+  - `checkpoints/depth_anything_v2_metric_vkitti_<encoder>.pth`
+
+`config.yaml` 例（Indoor）:
+
+```yaml
+depth_mode: metric
+depth_anything_encoder: vitl
+depth_anything_metric_dataset: hypersim
+depth_anything_max_depth: 20
+# depth_anything_ckpt: checkpoints/depth_anything_v2_metric_hypersim_vitl.pth  # 明示する場合
+```
 
 ### モデル構成の切り替えと復元ルール（重要）
 このプロジェクトでは **学習時のモデル構成（GRU/Transformer 等）を推論時に確実に再現**できるように、checkpoint に「モデル引数」を保存してあります。
@@ -186,7 +210,8 @@ tf_norm_first: true
     - **中核**:
       - `yolo_track_pose()` で人物 bbox/追跡ID/COCO17 keypoints を取得
       - `EgoMotionTracker.update()` で背景オプティカルフローから ego motion を推定
-      - `depth_mode` が `"midas"` のとき `DepthAnythingV2DepthEstimator` を使い、bboxの中心深度を meters にキャリブレーションして `root(x,y,z)` を推定（失敗時は bbox 推定へフォールバック）
+      - `depth_mode` が `"midas"` のとき `DepthAnythingV2DepthEstimator`（相対深度）を使い、bbox近似でスケール合わせして `root(x,y,z)` を推定（失敗時は bbox 推定へフォールバック）
+      - `depth_mode` が `"metric"` のとき `DepthAnythingV2DepthEstimator`（絶対深度）を使い、**meters深度**から `root(x,y,z)` を推定（失敗時は bbox 推定へフォールバック）
       - `build_npz_from_video_buffers()` で `X/M/y` を保存
   - **`preprocess_video_dir(video_dir, out_dir, cfg, skip_existing=False)`**: 複数動画をまとめて処理して `.npz` パス一覧を返す。
 - **主要引数（cfg）**: `T/H/Nmax/D`, `use_pose_delta`, `use_ego_motion`, `ego_as_feature`, `ego_normalize`, `depth_mode`, YOLO関連

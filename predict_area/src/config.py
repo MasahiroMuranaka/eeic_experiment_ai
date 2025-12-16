@@ -37,7 +37,18 @@ class SafetyConfig:
     beta_risk: float = 1.0    # S = exp(-beta*R)
 
     # ===== Depth mode =====
-    depth_mode: str = "bbox"  # "bbox" or "midas"
+    # "bbox": bbox高さから距離推定（簡易）
+    # "midas": 既存互換（DepthAnythingV2の相対深度 + スケール合わせ）
+    # "metric": DepthAnythingV2/metric_depth による絶対深度（meters）
+    depth_mode: str = "bbox"
+
+    # ===== DepthAnythingV2 settings (optional; used via cfg_get) =====
+    # metric depth を使う場合は True 推奨（depth_mode="metric" でも自動的に True 扱い）
+    depth_anything_metric: bool = False
+    # metricモデルの種類: "hypersim"(indoor) or "vkitti"(outdoor)
+    depth_anything_metric_dataset: str = "hypersim"
+    # metricモデルの max_depth（hypersim推奨=20, vkitti推奨=80）
+    depth_anything_max_depth: float = 20.0
 
     # ===== Training =====
     batch_size: int = 32

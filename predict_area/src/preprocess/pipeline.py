@@ -8,7 +8,7 @@ from typing import Dict, List, Optional, Tuple
 
 import cv2
 import numpy as np
-from ultralytics import YOLO
+from ultralytics import YOLO  # type: ignore[import-not-found]
 
 from config import SafetyConfig
 from preprocess.io_utils import cfg_get, ensure_dir
@@ -80,7 +80,15 @@ def preprocess_one_video(
 
     # depth
     depth_mode = str(cfg_get(cfg, "depth_mode", "bbox")).lower()
-    use_depth_anything = (depth_mode == "midas")  # 既存 config を崩さず DAV2 を割り当て
+    # 既存の "midas" 互換に加えて、絶対深度（metric）指定も受ける
+    use_depth_anything = depth_mode in (
+        "midas",
+        "depth_anything",
+        "dav2",
+        "metric",
+        "metric_depth",
+        "depth_anything_metric",
+    )
     depth_est = DepthAnythingV2DepthEstimator(cfg) if use_depth_anything else None
 
     frames_ego: List[Tuple[float, float]] = []
@@ -234,7 +242,16 @@ class _SimpleIoUTracker:
         self.iou_thresh = float(iou_thresh)
         self.max_lost = int(max_lost)
         self._next_id = 1
-        self._tracks: Dict[int, Dict[str, object]] = {}  # tid -> {box, lost}
+        # keep typing precise for static checkers
+        from dataclasses import dataclass
+
+        @dataclass
+        class _TrackState:
+            box: np.ndarray
+            lost: int
+
+        self._TrackState = _TrackState
+        self._tracks: Dict[int, _TrackState] = {}  # tid -> state
 
     def update(self, boxes_xyxy: np.ndarray) -> np.ndarray:
         boxes_xyxy = np.asarray(boxes_xyxy, dtype=np.float32)
@@ -243,8 +260,8 @@ class _SimpleIoUTracker:
 
         # age tracks
         for tid in list(self._tracks.keys()):
-            self._tracks[tid]["lost"] = int(self._tracks[tid]["lost"]) + 1  # type: ignore[arg-type]
-            if int(self._tracks[tid]["lost"]) > self.max_lost:  # type: ignore[arg-type]
+            self._tracks[tid].lost = int(self._tracks[tid].lost) + 1
+            if int(self._tracks[tid].lost) > self.max_lost:
                 del self._tracks[tid]
 
         if n == 0:
@@ -258,19 +275,19 @@ class _SimpleIoUTracker:
             for tid, st in track_items:
                 if tid in used_tracks:
                     continue
-                iou = _boxes_iou_xyxy(boxes_xyxy[i], np.asarray(st["box"], dtype=np.float32))  # type: ignore[index]
+                iou = _boxes_iou_xyxy(boxes_xyxy[i], np.asarray(st.box, dtype=np.float32))
                 if iou > best_iou:
                     best_iou = iou
                     best_tid = tid
             if best_tid is not None and best_iou >= self.iou_thresh:
                 ids[i] = int(best_tid)
                 used_tracks.add(best_tid)
-                self._tracks[best_tid] = {"box": boxes_xyxy[i].copy(), "lost": 0}
+                self._tracks[best_tid] = self._TrackState(box=boxes_xyxy[i].copy(), lost=0)
             else:
                 tid_new = int(self._next_id)
                 self._next_id += 1
                 ids[i] = tid_new
-                self._tracks[tid_new] = {"box": boxes_xyxy[i].copy(), "lost": 0}
+                self._tracks[tid_new] = self._TrackState(box=boxes_xyxy[i].copy(), lost=0)
         return ids
 
 
@@ -416,4 +433,3 @@ def preprocess_one_frames_dir(
     except Exception as e:
         print(f"[preprocess] failed building npz for frames_dir={frames_dir}: {e}")
         return None
-

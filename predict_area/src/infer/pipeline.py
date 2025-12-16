@@ -10,7 +10,7 @@ from typing import Dict, Optional, Tuple
 import cv2
 import numpy as np
 import torch
-from ultralytics import YOLO
+from ultralytics import YOLO  # type: ignore[import-not-found]
 
 from config import SafetyConfig, load_config
 from preprocess.io_utils import cfg_get
@@ -113,7 +113,14 @@ def run_inference(
 
     # depth
     depth_mode = str(cfg_get(cfg, "depth_mode", "bbox")).lower()
-    use_depth_anything = (depth_mode == "midas")
+    use_depth_anything = depth_mode in (
+        "midas",
+        "depth_anything",
+        "dav2",
+        "metric",
+        "metric_depth",
+        "depth_anything_metric",
+    )
     depth_est = DepthAnythingV2DepthEstimator(cfg) if use_depth_anything else None
 
     frames_state: deque = deque(maxlen=T)
