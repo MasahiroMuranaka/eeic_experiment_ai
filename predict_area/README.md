@@ -17,6 +17,20 @@ cd /Users/muranakamasahiro/Dev/eeic_experiment_ai/predict_area
 ```
 
 #### 前処理（npz生成）
+
+- **（これ！）フレームフォルダ + bbox JSON + 正解分布JSON（新）**　
+
+```bash
+python -m src.preprocess.cli \
+  --frames-dir /path/to/frames_dir \
+  --out-dir /path/to/out_npz_dir \
+  --config /path/to/config.yaml \
+  --det-json /path/to/*_image8.json \
+  --y-json /path/to/*.json \
+  --fps 30
+```
+
+
 - **動画ディレクトリ → npz一括生成（従来どおり）**
 
 ```bash
@@ -65,17 +79,6 @@ python -m src.preprocess.cli \
   --fps 30
 ```
 
-- **（これ！）フレームフォルダ + bbox JSON + 正解分布JSON（新）**　
-
-```bash
-python -m src.preprocess.cli \
-  --frames-dir /path/to/frames_dir \
-  --out-dir /path/to/out_npz_dir \
-  --config /path/to/config.yaml \
-  --det-json /Users/muranakamasahiro/Dev/eeic_experiment_ai/tressider-2019-04-26_2_image8.json \
-  --y-json /Users/muranakamasahiro/Dev/eeic_experiment_ai/tressider-2019-04-26_2.json \
-  --fps 30
-```
 
 #### 学習（npz → ckpt）
 （`src/train.py` を使用。npz単体/npz-dir/manifest のいずれかを指定できます）
@@ -103,12 +106,63 @@ python -m src.infer.cli \
 
 ```bash
 python -m src.infer.cli \
-  --frames-dir /path/to/frames_dir \
-  --ckpt /path/to/model.pt \
+  --frames-dir /path/to/frames_dir \ <= テストデータへのディレクトリ
+  --ckpt /path/to/model.pt \ <= モデルのチェックポイント
   --config /path/to/config.yaml \
   --out-csv /path/to/out.csv \
   --out-video /path/to/out.mp4 \
   --fps 30
+```
+
+#### 評価（教師分布と予測分布の比較）
+`src/eval.py` は、**教師データの確率分布 \(q\)** と **モデル予測の確率分布 \(p\)** を比較し、分布のズレを指標として出力します（分類の正解率だけでなく、**「どれだけ分布として近いか」**を見たいときに使います）。
+
+評価指標（平均）:
+- **CE（cross entropy）**: \(-\sum_k q_k \log p_k\)（小さいほど良い）
+- **KL**: \(\sum_k q_k \log(q_k/p_k)\)（小さいほど良い）
+- **JS**: Jensen–Shannon divergence（小さいほど良い、対称）
+- **EMD（1D Earth Mover）**: \(\sum |\mathrm{cumsum}(q-p)|\)（小さいほど良い）
+  - `mean_emd_bins`: bin単位
+  - `mean_emd_x`: `x_min/x_max` を使って **実座標（x方向）**に換算した距離
+- **top1_acc**: `argmax(q)==argmax(p)` の一致率（参考）
+- **mean_abs_bin_expect / mean_abs_x_expect**: 期待値（bin / x座標）の差（小さいほど良い）
+
+`src/eval.py` には 2つの評価モードがあります。
+
+##### A) ckpt + npz で評価（推奨）
+学習に使った `.npz` には **教師 `y`（=確率分布）**が入っているので、`--ckpt` を指定すると **npzの `X/M` をモデルに入れて予測 \(p\) を作り、npzの教師 \(q\) と比較**します。
+
+```bash
+python src/eval.py \
+  --ckpt /Users/muranakamasahiro/Dev/eeic_experiment_ai/predict_area/ckpt \
+  --npz-dir /path/to/out_npz_dir \
+  --config /path/to/config.yaml
+```
+
+npzの指定方法（いずれか）:
+- `--npz /path/to/file.npz`
+- `--npz-dir /path/to/dir`（再帰で `.npz` を探索）
+- `--manifest /path/to/manifest.txt`（1行1パス）
+
+注意:
+- **preprocess/train と同じ `config.yaml`** を使ってください（特徴量次元が一致しないと推論できません）。
+- `predict_area/npz/` が空の場合は、まず前処理（npz生成）を実行して `.npz` を作ってください。
+
+##### B) 予測CSV + 教師JSON で評価（frame対応）
+すでに推論で出した `out.csv`（`frame,p0..pK-1`）と、教師 `answers/*.json`（`frame_name -> [K]`）を突き合わせて評価します。  
+CSVの `frame` は **フレーム番号**なので、`--frames-dir` を指定して **frame番号 → frameファイル名（例: `000479.jpg`）** に変換して対応付けます。
+
+```bash
+python src/eval.py \
+  --pred-csv /path/to/out.csv \
+  --gt-json /Users/muranakamasahiro/Dev/eeic_experiment_ai/predict_area/answers/tressider-2019-04-26_2.json \
+  --frames-dir /path/to/frames_dir
+```
+
+（任意）結果をJSON保存:
+
+```bash
+python src/eval.py ... --out-json /path/to/summary.json
 ```
 
 ### 重要なデータ仕様（共通）

@@ -1,27 +1,51 @@
 import argparse
 import os
+import sys
 import platform
 import random
 from typing import List
 
 import numpy as np
-import torch
-from torch.utils.data import DataLoader
-from tqdm import tqdm
 
-from config import SafetyConfig, load_config, save_config
-from dataset import MultiNpzSafetyDataset, list_npz_in_dir, read_manifest
-from model import SafetyNet
+_SRC_DIR = os.path.abspath(os.path.dirname(__file__))
+if _SRC_DIR not in sys.path:
+    sys.path.insert(0, _SRC_DIR)
+
+from config import SafetyConfig, load_config, save_config  # noqa: E402
+from dataset import MultiNpzSafetyDataset, list_npz_in_dir, read_manifest  # noqa: E402
+from model import SafetyNet  # noqa: E402
+
+
+def _load_train_deps():
+    """
+    Dynamic import to avoid static type-checker import resolution issues in some environments.
+    """
+    import importlib
+
+    try:
+        torch = importlib.import_module("torch")
+        DataLoader = importlib.import_module("torch.utils.data").DataLoader
+        tqdm = importlib.import_module("tqdm").tqdm
+    except ModuleNotFoundError as e:
+        raise SystemExit(
+            "学習に必要な依存関係が見つかりません（torch / tqdm）。`uv sync` で依存関係を入れてください。\n"
+            f"詳細: {e}"
+        ) from e
+    return torch, DataLoader, tqdm
 
 
 def set_seed(seed: int):
+    torch, _, _ = _load_train_deps()
+
     random.seed(seed)
     np.random.seed(seed)
     torch.manual_seed(seed)
     torch.cuda.manual_seed_all(seed)
 
 
-def soft_ce_loss(logits: torch.Tensor, q: torch.Tensor) -> torch.Tensor:
+def soft_ce_loss(logits, q):
+    torch, _, _ = _load_train_deps()
+
     # q: [B,K], logits: [B,K]
     logp = torch.log_softmax(logits, dim=-1)
     return -(q * logp).sum(dim=-1).mean()
@@ -51,6 +75,8 @@ def default_num_workers() -> int:
 
 
 def main():
+    torch, DataLoader, tqdm = _load_train_deps()
+
     ap = argparse.ArgumentParser()
     ap.add_argument("--train-npz", default="", help="single npz path (legacy)")
     ap.add_argument("--npz-dir", default="", help="directory containing multiple npz (recursive)")

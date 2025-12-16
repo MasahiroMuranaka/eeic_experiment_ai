@@ -5,7 +5,7 @@ from typing import Any, Dict
 @dataclass
 class SafetyConfig:
     # ===== Output bins (横方向K分割) =====
-    K: int = 9
+    K: int = 8
     x_min: float = -2.0  # [m] 左端
     x_max: float = 2.0  # [m] 右端
 

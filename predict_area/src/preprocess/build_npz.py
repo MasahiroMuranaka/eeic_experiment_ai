@@ -74,10 +74,18 @@ def build_npz_from_video_buffers(
         any_name = next(iter(y_map.keys()))
         ext_k = int(np.asarray(y_map[any_name]).shape[0])
         if ext_k != K:
-            raise ValueError(
-                f"External y has K={ext_k} but cfg.K={K}. "
-                "Please set cfg.K to match the probability distribution length."
+            # When teacher distributions are provided externally, K must match that distribution length.
+            # For convenience, we automatically align cfg.K to ext_k so preprocess can proceed.
+            print(
+                f"[preprocess] warning: external y has K={ext_k} but cfg.K={K}. "
+                "Auto-adjusting cfg.K to match external y."
             )
+            try:
+                setattr(cfg, "K", int(ext_k))
+            except Exception:
+                # cfg is expected to be mutable, but keep running even if not.
+                pass
+            K = int(ext_k)
     else:
         frames_xz: List[List[Tuple[float, float]]] = []
         for st in frames_state:
