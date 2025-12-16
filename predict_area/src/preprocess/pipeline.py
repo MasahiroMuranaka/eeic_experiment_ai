@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import glob
+import csv
 from typing import Dict, List, Optional, Tuple
 
 import cv2
@@ -157,6 +158,9 @@ def preprocess_one_video(
     finally:
         cap.release()
 
+    out_csv = os.path.join(out_dir, f"{base}.csv")
+    save_tracking_csv(out_csv, frames_state, frames_ego, fps)
+    
     try:
         build_npz_from_video_buffers(
             frames_state=frames_state,
@@ -203,3 +207,77 @@ def preprocess_video_dir(
         if out_npz:
             npz_paths.append(out_npz)
     return npz_paths
+
+def save_tracking_csv(
+    csv_path: str,
+    frames_state: List[Dict[int, Dict[str, np.ndarray]]],
+    frames_ego: List[Tuple[float, float]],
+    fps: float
+):
+    """
+    時系列データから速度を計算し、CSVとして保存する
+    """
+    header = [
+        "frame_id", "track_id", 
+        "root_x", "root_y", "root_z",  # 3次元位置 (zが深度)
+        "vel_x", "vel_y",              # 速度ベクトル (m/s)
+        "ego_vx", "ego_vy",            # カメラの動き
+    ]
+    # ポーズ(関節)データのヘッダー追加 (34要素: x,y * 17点) ※簡易化のためconfは除く
+    for i in range(17):
+        header.extend([f"kpt_{i}_x", f"kpt_{i}_y"])
+
+    rows = []
+    prev_positions = {} # {track_id: (x, y)}
+
+    for frame_idx, (st, ego) in enumerate(zip(frames_state, frames_ego)):
+        ego_vx, ego_vy = ego
+        
+        for tid, info in st.items():
+            # info["root"] には [x, y, z] が入っている (DepthAnything等で計算済み)
+            root = info["root"]
+            rx, ry, rz = root[0], root[1], root[2]
+            
+            # --- 速度ベクトルの計算 (今回追加するロジック) ---
+            vx, vy = 0.0, 0.0
+            if tid in prev_positions:
+                px, py = prev_positions[tid]
+                # (現在の位置 - 1フレーム前の位置) * FPS = 秒速
+                vx = (rx - px) * fps
+                vy = (ry - py) * fps
+            
+            # 位置を更新
+            prev_positions[tid] = (rx, ry)
+
+            # 行データの作成
+            row = [
+                frame_idx, tid,
+                rx, ry, rz,
+                vx, vy,
+                ego_vx, ego_vy
+            ]
+            
+            # 関節データ (info["pose"] はフラット化されている前提)
+            # pose_flat は [x1, y1, conf1, x2, y2, conf2...] の並びなので座標だけ抜く
+            pose = info["pose"]
+            kpts_xy = []
+            for k in range(17):
+                # 3つ飛ばしでx, yを取得 (confは飛ばす)
+                idx = k * 3
+                if idx + 1 < len(pose):
+                    kpts_xy.extend([pose[idx], pose[idx+1]])
+                else:
+                    kpts_xy.extend([0, 0])
+            
+            row.extend(kpts_xy)
+            rows.append(row)
+
+    # 書き出し
+    try:
+        with open(csv_path, "w", newline="", encoding="utf-8") as f:
+            writer = csv.writer(f)
+            writer.writerow(header)
+            writer.writerows(rows)
+        print(f"[preprocess] Saved CSV: {csv_path}")
+    except Exception as e:
+        print(f"[preprocess] Failed to save CSV: {e}")
