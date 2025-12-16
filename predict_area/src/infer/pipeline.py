@@ -18,6 +18,7 @@ from preprocess.camera import camera_intrinsics_from_fov, pseudo3d_pose_from_key
 from preprocess.ego import EgoMotionTracker
 from preprocess.yolo_pose import yolo_track_pose
 from preprocess.depth_anything_v2 import DepthAnythingV2DepthEstimator
+from preprocess.frame_source import iter_frames_from_dir, read_first_frame
 
 from infer.features import build_feature_tensor
 from model import SafetyNet
@@ -51,6 +52,8 @@ def run_inference(
     out_csv: str = "",
     show: bool = False,
     max_frames: int = 0,
+    frames_dir: str = "",
+    fps_override: float = 0.0,
 ) -> None:
     """
     推論パイプライン（CLI から呼ぶための “分割版” のエントリポイント）。
@@ -76,13 +79,23 @@ def run_inference(
 
     pose_model = YOLO(pose_model_path)
 
-    cap = cv2.VideoCapture(video_path)
-    if not cap.isOpened():
-        raise SystemExit(f"Cannot open video: {video_path}")
+    if bool(video_path) == bool(frames_dir):
+        raise ValueError("Specify exactly one of video_path or frames_dir")
 
-    width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH) or 0)
-    height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT) or 0)
-    fps = float(cap.get(cv2.CAP_PROP_FPS) or float(cfg_get(cfg, "fps", 30.0)) or 30.0)
+    cap = None
+    if video_path:
+        cap = cv2.VideoCapture(video_path)
+        if not cap.isOpened():
+            raise SystemExit(f"Cannot open video: {video_path}")
+        width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH) or 0)
+        height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT) or 0)
+        fps = float(cap.get(cv2.CAP_PROP_FPS) or float(cfg_get(cfg, "fps", 30.0)) or 30.0)
+        frame_iter = None
+    else:
+        first_name, first_frame = read_first_frame(frames_dir)
+        height, width = int(first_frame.shape[0]), int(first_frame.shape[1])
+        fps = float(fps_override) if fps_override and fps_override > 0 else float(cfg_get(cfg, "fps", 30.0)) or 30.0
+        frame_iter = iter_frames_from_dir(frames_dir, max_frames=max_frames)
 
     # camera + pose params
     fov_y_deg = float(cfg_get(cfg, "fov_y_deg", 60.0))
@@ -121,11 +134,17 @@ def run_inference(
     frame_idx = 0
     try:
         while True:
-            ret, frame = cap.read()
-            if not ret:
-                break
-            if max_frames and frame_idx >= max_frames:
-                break
+            if frame_iter is None:
+                ret, frame = cap.read()
+                if not ret:
+                    break
+                if max_frames and frame_idx >= max_frames:
+                    break
+            else:
+                try:
+                    _, _, frame = next(frame_iter)  # type: ignore[assignment]
+                except StopIteration:
+                    break
 
             boxes, ids, confs, kpts_xy, kpts_conf = yolo_track_pose(
                 model=pose_model,
@@ -227,7 +246,8 @@ def run_inference(
             frame_idx += 1
 
     finally:
-        cap.release()
+        if cap is not None:
+            cap.release()
         if writer is not None:
             writer.release()
         if csv_f is not None:
@@ -257,6 +277,7 @@ def run_infer(
     # core impl
     run_inference(
         video_path=video_path,
+        frames_dir="",
         ckpt_in_dim=in_dim,
         K=K,
         cfg=cfg,

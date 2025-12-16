@@ -40,7 +40,9 @@ def build_feature_tensor(
         J = 17
         J3 = 17 * 3
 
-    base_dim = 3 + 3 + 3 + 1 + 1 + 1  # root, vel, dir, speed, dist, ttc
+    # base features (keep everything except vel(3) and speed(1)):
+    # root(3) + dir(3) + dist(1) + ttc(1)
+    base_dim = 3 + 3 + 1 + 1
     ego_dim = 2 if (use_ego_motion and ego_as_feature) else 0
     dpose_dim = J3 if use_pose_delta else 0
     F = base_dim + ego_dim + J3 + dpose_dim + J
@@ -114,9 +116,7 @@ def build_feature_tensor(
             feat_vec = np.concatenate(
                 [
                     root,
-                    v3.astype(np.float32),
                     dvec,
-                    np.array([speed], dtype=np.float32),
                     np.array([dist], dtype=np.float32),
                     np.array([ttc], dtype=np.float32),
                     ego_feat,

@@ -9,6 +9,108 @@
 
 ---
 
+### コマンドライン実行方法（動画/フレーム対応）
+作業ディレクトリを `predict_area/` に移動して実行します。
+
+```bash
+cd /Users/muranakamasahiro/Dev/eeic_experiment_ai/predict_area
+```
+
+#### 前処理（npz生成）
+- **動画ディレクトリ → npz一括生成（従来どおり）**
+
+```bash
+python -m src.preprocess.cli \
+  --video-dir /path/to/videos \
+  --out-dir /path/to/out_npz_dir \
+  --config /path/to/config.yaml \
+  --skip-existing
+```
+
+- **フレームフォルダ（画像列）→ npz生成（新）**
+  - 動画が無いので `--fps` を必要に応じて指定（未指定なら `config.yaml` の `fps` / デフォルト30）
+
+```bash
+python -m src.preprocess.cli \
+  --frames-dir /path/to/frames_dir \
+  --out-dir /path/to/out_npz_dir \
+  --config /path/to/config.yaml \
+  --fps 30 \
+  --skip-existing
+```
+
+- **フレームフォルダ + 正解分布JSONで教師 `y` を使用（新）**
+  - `tressider-2019-04-26_2.json` は `frame_name -> [K]` の確率分布です
+  - **注意**: JSON内の分布長 `K` と `config.yaml` の `K` を一致させてください（不一致だと前処理でエラーになります）
+
+```bash
+python -m src.preprocess.cli \
+  --frames-dir /path/to/frames_dir \
+  --out-dir /path/to/out_npz_dir \
+  --config /path/to/config.yaml \
+  --y-json /Users/muranakamasahiro/Dev/eeic_experiment_ai/tressider-2019-04-26_2.json \
+  --fps 30
+```
+
+- **フレームフォルダ + bbox JSONを使用（新）**
+  - `tressider-2019-04-26_2_image8.json` は `detections[frame_name]` に bbox が入っています
+  - bbox JSON には追跡IDが無い想定のため、内部で **IoU簡易トラッキング**してIDを割り当てます
+
+```bash
+python -m src.preprocess.cli \
+  --frames-dir /path/to/frames_dir \
+  --out-dir /path/to/out_npz_dir \
+  --config /path/to/config.yaml \
+  --det-json /Users/muranakamasahiro/Dev/eeic_experiment_ai/tressider-2019-04-26_2_image8.json \
+  --fps 30
+```
+
+- **（これ！）フレームフォルダ + bbox JSON + 正解分布JSON（新）**　
+
+```bash
+python -m src.preprocess.cli \
+  --frames-dir /path/to/frames_dir \
+  --out-dir /path/to/out_npz_dir \
+  --config /path/to/config.yaml \
+  --det-json /Users/muranakamasahiro/Dev/eeic_experiment_ai/tressider-2019-04-26_2_image8.json \
+  --y-json /Users/muranakamasahiro/Dev/eeic_experiment_ai/tressider-2019-04-26_2.json \
+  --fps 30
+```
+
+#### 学習（npz → ckpt）
+（`src/train.py` を使用。npz単体/npz-dir/manifest のいずれかを指定できます）
+
+```bash
+python -m src.train \
+  --npz-dir /path/to/out_npz_dir \
+  --config /path/to/config.yaml \
+  --out-ckpt /path/to/out_model.pt
+```
+
+#### 推論（ckpt + 入力 → CSV/動画）
+- **動画で推論（従来どおり）**
+
+```bash
+python -m src.infer.cli \
+  --video /path/to/input.mp4 \
+  --ckpt /path/to/model.pt \
+  --config /path/to/config.yaml \
+  --out-csv /path/to/out.csv \
+  --out-video /path/to/out.mp4
+```
+
+- **フレームフォルダで推論（新）**
+
+```bash
+python -m src.infer.cli \
+  --frames-dir /path/to/frames_dir \
+  --ckpt /path/to/model.pt \
+  --config /path/to/config.yaml \
+  --out-csv /path/to/out.csv \
+  --out-video /path/to/out.mp4 \
+  --fps 30
+```
+
 ### 重要なデータ仕様（共通）
 学習/推論で扱うテンソルは以下が前提です。
 
@@ -23,7 +125,7 @@
 
 特徴量 `F` は以下（実装に準拠）です。
 
-- `root(3) + vel(3) + dir(3) + speed(1) + dist(1) + ttc(1)`
+- `root(3) + dir(3) + dist(1) + ttc(1)`（※vel/speed は特徴量から除外）
 - `+ ego(2)`（`use_ego_motion && ego_as_feature` のとき）
 - `+ pose(J3)`（`J*3` のフラット 3D 擬似骨格）
 - `+ dpose(J3)`（`use_pose_delta` のとき）

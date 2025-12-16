@@ -1,6 +1,6 @@
 import os
 from dataclasses import asdict
-from typing import Dict, List, Tuple
+from typing import Dict, List, Optional, Tuple
 
 import numpy as np
 
@@ -18,6 +18,8 @@ def build_npz_from_video_buffers(
     cfg: SafetyConfig,
     out_npz_path: str,
     video_path: str,
+    frame_names: Optional[List[str]] = None,
+    y_by_frame_name: Optional[Dict[str, np.ndarray]] = None,
 ) -> None:
     eps = float(cfg_get(cfg, "eps", 1e-6))
     K = int(cfg_get(cfg, "K", 9))
@@ -51,34 +53,70 @@ def build_npz_from_video_buffers(
     if J3 is None or J is None:
         raise RuntimeError(f"No people detected in entire video: {video_path}")
 
-    base_dim = 3 + 3 + 3 + 1 + 1 + 1
+    # base features (keep everything except vel(3) and speed(1)):
+    # root(3) + dir(3) + dist(1) + ttc(1)
+    base_dim = 3 + 3 + 1 + 1
     ego_dim = 2 if (use_ego_motion and ego_as_feature) else 0
     dpose_dim = J3 if use_pose_delta else 0
     F = base_dim + ego_dim + J3 + dpose_dim + J
 
-    frames_xz: List[List[Tuple[float, float]]] = []
-    for st in frames_state:
-        xz_list = []
-        for _, d in st.items():
-            root = d["root"]
-            x = float(root[0])
-            z = float(root[2])
-            dist = float(np.linalg.norm(root))
-            if dist <= D:
-                xz_list.append((x, z))
-        frames_xz.append(xz_list)
+    use_external_y = y_by_frame_name is not None
+    if use_external_y:
+        if frame_names is None or y_by_frame_name is None:
+            raise ValueError("frame_names and y_by_frame_name are required together")
+        names = frame_names
+        y_map = y_by_frame_name
+        if len(names) != len(frames_state):
+            raise ValueError(
+                f"frame_names length mismatch: names={len(names)} frames_state={len(frames_state)}"
+            )
+        # validate K
+        any_name = next(iter(y_map.keys()))
+        ext_k = int(np.asarray(y_map[any_name]).shape[0])
+        if ext_k != K:
+            raise ValueError(
+                f"External y has K={ext_k} but cfg.K={K}. "
+                "Please set cfg.K to match the probability distribution length."
+            )
+    else:
+        frames_xz: List[List[Tuple[float, float]]] = []
+        for st in frames_state:
+            xz_list = []
+            for _, d in st.items():
+                root = d["root"]
+                x = float(root[0])
+                z = float(root[2])
+                dist = float(np.linalg.norm(root))
+                if dist <= D:
+                    xz_list.append((x, z))
+            frames_xz.append(xz_list)
 
     X_list, M_list, y_list = [], [], []
     num_frames = len(frames_state)
 
-    if num_frames < (T + H):
-        raise RuntimeError(f"Video too short for T/H. frames={num_frames} T={T} H={H} video={video_path}")
+    if use_external_y:
+        if num_frames < T:
+            raise RuntimeError(f"Sequence too short for T. frames={num_frames} T={T} video={video_path}")
+        t_end = num_frames
+    else:
+        if num_frames < (T + H):
+            raise RuntimeError(f"Video too short for T/H. frames={num_frames} T={T} H={H} video={video_path}")
+        t_end = num_frames - H
 
-    for t in range(T - 1, num_frames - H):
-        future_people = [frames_xz[t + tau + 1] for tau in range(H)]
-        y = compute_soft_label_from_future_xz(
-            future_people, K, x_min, x_max, alpha_depth, gamma_time, beta_risk
-        )
+    for t in range(T - 1, t_end):
+        if use_external_y:
+            # (narrowed above)
+            name = names[t]
+            if name not in y_map:
+                raise KeyError(f"External y missing for frame: {name}")
+            y = np.asarray(y_map[name], dtype=np.float32)
+            if y.shape != (K,):
+                raise ValueError(f"Invalid y shape for {name}: {y.shape} expected ({K},)")
+        else:
+            future_people = [frames_xz[t + tau + 1] for tau in range(H)]
+            y = compute_soft_label_from_future_xz(
+                future_people, K, x_min, x_max, alpha_depth, gamma_time, beta_risk
+            )
 
         cur = frames_state[t]
         cand = []
@@ -143,9 +181,7 @@ def build_npz_from_video_buffers(
                 feat_vec = np.concatenate(
                     [
                         root,
-                        v3.astype(np.float32),
                         dvec,
-                        np.array([speed], dtype=np.float32),
                         np.array([dist], dtype=np.float32),
                         np.array([ttc], dtype=np.float32),
                         ego_feat,

@@ -23,7 +23,7 @@
 
 特徴量 `F` は以下（実装に準拠）です。
 
-- `root(3) + vel(3) + dir(3) + speed(1) + dist(1) + ttc(1)`
+- `root(3) + dir(3) + dist(1) + ttc(1)`（※vel/speed は特徴量から除外）
 - `+ ego(2)`（`use_ego_motion && ego_as_feature` のとき）
 - `+ pose(J3)`（`J*3` のフラット 3D 擬似骨格）
 - `+ dpose(J3)`（`use_pose_delta` のとき）

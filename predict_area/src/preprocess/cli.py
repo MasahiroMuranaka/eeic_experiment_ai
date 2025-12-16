@@ -22,11 +22,16 @@ def write_manifest(out_dir: str, npz_paths: List[str]) -> str:
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--video-dir", required=True, help="directory containing videos")
+    g = ap.add_mutually_exclusive_group(required=True)
+    g.add_argument("--video-dir", default="", help="directory containing videos")
+    g.add_argument("--frames-dir", default="", help="directory containing frame images (one sequence)")
     ap.add_argument("--out-dir", required=True, help="output directory for npz files")
     ap.add_argument("--config", default="", help="config yaml path")
     ap.add_argument("--save-config", default="", help="write default config yaml and exit")
     ap.add_argument("--skip-existing", action="store_true", help="skip if npz already exists")
+    ap.add_argument("--y-json", default="", help="optional teacher distribution json (frame_name -> [K])")
+    ap.add_argument("--det-json", default="", help="optional detection json (for frames-dir; provides person boxes)")
+    ap.add_argument("--fps", type=float, default=0.0, help="fps override (useful for frames-dir)")
     args = ap.parse_args()
 
     cfg = load_config(args.config) if args.config else SafetyConfig()
@@ -59,22 +64,39 @@ def main():
             f"詳細: {e}"
         ) from e
 
-    vids = list_videos(args.video_dir)
-    if not vids:
-        raise SystemExit(f"No videos found in: {args.video_dir}")
-
     npz_paths: List[str] = []
-    for vp in vids:
-        print(f"[preprocess] processing: {vp}")
-        out_npz = preprocess_one_video(
-            video_path=vp,
+    if args.frames_dir:
+        from preprocess.pipeline import preprocess_one_frames_dir
+
+        print(f"[preprocess] processing frames_dir: {args.frames_dir}")
+        out_npz = preprocess_one_frames_dir(
+            frames_dir=args.frames_dir,
             out_dir=args.out_dir,
             yolo_pose_model=yolo_pose_model,
             cfg=cfg,
             skip_existing=args.skip_existing,
+            y_json=args.y_json,
+            det_json=args.det_json,
+            fps_override=float(args.fps),
         )
         if out_npz:
             npz_paths.append(out_npz)
+    else:
+        vids = list_videos(args.video_dir)
+        if not vids:
+            raise SystemExit(f"No videos found in: {args.video_dir}")
+
+        for vp in vids:
+            print(f"[preprocess] processing: {vp}")
+            out_npz = preprocess_one_video(
+                video_path=vp,
+                out_dir=args.out_dir,
+                yolo_pose_model=yolo_pose_model,
+                cfg=cfg,
+                skip_existing=args.skip_existing,
+            )
+            if out_npz:
+                npz_paths.append(out_npz)
 
     if not npz_paths:
         raise SystemExit("No npz outputs were generated.")
