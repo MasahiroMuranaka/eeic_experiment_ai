@@ -13,17 +13,17 @@ import numpy as np
 import torch
 from ultralytics import YOLO  # type: ignore[import-not-found]
 
-from config import SafetyConfig, load_config
-from preprocess.io_utils import cfg_get
-from preprocess.camera import camera_intrinsics_from_fov, pseudo3d_pose_from_keypoints, estimate_root_xyz_from_bbox
-from preprocess.ego import EgoMotionTracker
-from preprocess.yolo_pose import yolo_track_pose
-from preprocess.depth_anything_v2 import DepthAnythingV2DepthEstimator
-from preprocess.frame_source import iter_frames_from_dir, read_first_frame
+from ..config import SafetyConfig, load_config
+from ..preprocess.io_utils import cfg_get
+from ..preprocess.camera import camera_intrinsics_from_fov, pseudo3d_pose_from_keypoints, estimate_root_xyz_from_bbox
+from ..preprocess.ego import EgoMotionTracker
+from ..preprocess.yolo_pose import yolo_track_pose
+from ..preprocess.depth_anything_v2 import DepthAnythingV2DepthEstimator
+from ..preprocess.frame_source import iter_frames_from_dir, read_first_frame
 
-from infer.features import build_feature_tensor
-from model import SafetyNet
-from infer.model_io import load_safetynet
+from .features import build_feature_tensor
+from ..model import SafetyNet
+from .model_io import load_safetynet
 
 
 def draw_prob_bar(frame: np.ndarray, p: np.ndarray, x0=20, y0=40, w=320, h=12) -> np.ndarray:
@@ -228,7 +228,7 @@ def run_inference(
                 )
                 X = torch.from_numpy(X_np).to(device)
                 M = torch.from_numpy(M_np).to(device)
-                p_t, _ = model(X, M)  # [1,K]
+                p_t = model.predict_proba(X, M)  # [1,K]
                 p = p_t[0].detach().cpu().numpy()
 
             out_frame = frame

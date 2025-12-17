@@ -1,3 +1,64 @@
+### uvで仮想環境を構築して実行する手順（推奨）
+このプロジェクトは `pyproject.toml` と `uv.lock` を同梱しているため、`uv` で **仮想環境作成 + 依存関係インストール**までをまとめて行えます。
+
+#### 0) uv のインストール（未導入の場合）
+macOS（Homebrew）:
+
+```bash
+brew install uv
+```
+
+#### 1) 仮想環境の作成
+`predict_area/` に移動して、Python 3.11 で venv を作ります（`pyproject.toml` の `requires-python = ">=3.11"` に合わせます）。
+
+```bash
+cd /Users/muranakamasahiro/Dev/eeic_experiment_ai/predict_area
+uv venv --python 3.11
+```
+
+#### 2) 依存関係のインストール（ロックファイルから）
+
+```bash
+source .venv/bin/activate
+uv sync
+```
+
+（補足）もし `uv sync` がうまくいかない場合は、次で代替できます:
+
+```bash
+uv pip install -e .
+```
+
+#### 3) 実行例（学習 / 推論）
+以降は仮想環境を有効化したまま、READMEにあるコマンドをそのまま実行できます（`python -m ...`）。
+
+例: 学習
+
+```bash
+python -m src.train \
+  --npz-dir /path/to/out_npz_dir \
+  --config /path/to/config.yaml \
+  --out-ckpt /path/to/out_model.pt
+```
+
+例: 推論
+
+```bash
+python -m src.infer.cli \
+  --video /path/to/input.mp4 \
+  --ckpt /path/to/model.pt \
+  --config /path/to/config.yaml \
+  --out-csv /path/to/out.csv \
+  --out-video /path/to/out.mp4
+```
+
+（任意）仮想環境の activate を省略したい場合は `uv run` でも実行できます:
+
+```bash
+uv run python -m src.infer.cli --help
+```
+
+
 ### このドキュメントについて
 `predict_area/` 配下の各ファイル（主に `src/`）について、**役割**・**主要な関数/クラス**・**引数/入出力（特にテンソル形状）**を短くまとめたガイドです。
 
@@ -155,7 +216,7 @@ CSVの `frame` は **フレーム番号**なので、`--frames-dir` を指定し
 ```bash
 python src/eval.py \
   --pred-csv /path/to/out.csv \
-  --gt-json /Users/muranakamasahiro/Dev/eeic_experiment_ai/predict_area/answers/tressider-2019-04-26_2.json \
+  --gt-json /path/to/tressider-2019-04-26_2.json \
   --frames-dir /path/to/frames_dir
 ```
 

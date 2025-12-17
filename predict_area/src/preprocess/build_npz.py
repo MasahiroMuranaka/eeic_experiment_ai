@@ -4,9 +4,9 @@ from typing import Dict, List, Optional, Tuple
 
 import numpy as np
 
-from config import SafetyConfig
-from preprocess.io_utils import cfg_get, ensure_dir
-from preprocess.labels import compute_soft_label_from_future_xz
+from ..config import SafetyConfig  # type: ignore[import-not-found]
+from .io_utils import cfg_get, ensure_dir
+from .labels import compute_soft_label_from_future_xz
 
 
 def build_npz_from_video_buffers(
@@ -61,6 +61,10 @@ def build_npz_from_video_buffers(
     F = base_dim + ego_dim + J3 + dpose_dim + J
 
     use_external_y = y_by_frame_name is not None
+    # (type narrowing helpers for static analyzers)
+    names: List[str] = []
+    y_map: Dict[str, np.ndarray] = {}
+    frames_xz: List[List[Tuple[float, float]]] = []
     if use_external_y:
         if frame_names is None or y_by_frame_name is None:
             raise ValueError("frame_names and y_by_frame_name are required together")
@@ -87,7 +91,6 @@ def build_npz_from_video_buffers(
                 pass
             K = int(ext_k)
     else:
-        frames_xz: List[List[Tuple[float, float]]] = []
         for st in frames_state:
             xz_list = []
             for _, d in st.items():

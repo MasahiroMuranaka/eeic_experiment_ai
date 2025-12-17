@@ -1,51 +1,27 @@
 import argparse
 import os
-import sys
 import platform
 import random
 from typing import List
 
 import numpy as np
+import torch  # type: ignore[import-not-found]
+from torch.utils.data import DataLoader  # type: ignore[import-not-found]
 
-_SRC_DIR = os.path.abspath(os.path.dirname(__file__))
-if _SRC_DIR not in sys.path:
-    sys.path.insert(0, _SRC_DIR)
-
-from config import SafetyConfig, load_config, save_config  # noqa: E402
-from dataset import MultiNpzSafetyDataset, list_npz_in_dir, read_manifest  # noqa: E402
-from model import SafetyNet  # noqa: E402
-
-
-def _load_train_deps():
-    """
-    Dynamic import to avoid static type-checker import resolution issues in some environments.
-    """
-    import importlib
-
-    try:
-        torch = importlib.import_module("torch")
-        DataLoader = importlib.import_module("torch.utils.data").DataLoader
-        tqdm = importlib.import_module("tqdm").tqdm
-    except ModuleNotFoundError as e:
-        raise SystemExit(
-            "学習に必要な依存関係が見つかりません（torch / tqdm）。`uv sync` で依存関係を入れてください。\n"
-            f"詳細: {e}"
-        ) from e
-    return torch, DataLoader, tqdm
+from .config import SafetyConfig, load_config, save_config  # type: ignore[import-not-found]
+from .dataset import MultiNpzSafetyDataset, list_npz_in_dir, read_manifest  # type: ignore[import-not-found]
+from .model import SafetyNet  # type: ignore[import-not-found]
 
 
 def set_seed(seed: int):
-    torch, _, _ = _load_train_deps()
-
     random.seed(seed)
     np.random.seed(seed)
     torch.manual_seed(seed)
-    torch.cuda.manual_seed_all(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(seed)
 
 
-def soft_ce_loss(logits, q):
-    torch, _, _ = _load_train_deps()
-
+def soft_ce_loss(logits: torch.Tensor, q: torch.Tensor) -> torch.Tensor:
     # q: [B,K], logits: [B,K]
     logp = torch.log_softmax(logits, dim=-1)
     return -(q * logp).sum(dim=-1).mean()
@@ -75,8 +51,6 @@ def default_num_workers() -> int:
 
 
 def main():
-    torch, DataLoader, tqdm = _load_train_deps()
-
     ap = argparse.ArgumentParser()
     ap.add_argument("--train-npz", default="", help="single npz path (legacy)")
     ap.add_argument("--npz-dir", default="", help="directory containing multiple npz (recursive)")
@@ -130,6 +104,7 @@ def main():
     )
     print(f"[train] dataloader ready: batch={cfg.batch_size} num_workers={nw} pin_memory={pin}")
 
+    assert ds.F is not None and ds.K is not None
     in_dim = int(ds.F)
     K = int(ds.K)
 
@@ -154,13 +129,12 @@ def main():
         model.train()
         running = []
 
-        pbar = tqdm(dl, desc=f"epoch {epoch:03d}/{cfg.epochs}", leave=True)
-        for step, (X, M, y) in enumerate(pbar, start=1):
+        for step, (X, M, y) in enumerate(dl, start=1):
             X = X.to(device, non_blocking=True)
             M = M.to(device, non_blocking=True)
             y = y.to(device, non_blocking=True)
 
-            _, logits = model(X, M)
+            logits = model(X, M)
             loss = soft_ce_loss(logits, y)
 
             opt.zero_grad(set_to_none=True)
@@ -170,9 +144,6 @@ def main():
 
             loss_val = float(loss.item())
             running.append(loss_val)
-
-            # show batch loss and epoch mean
-            pbar.set_postfix(loss=f"{loss_val:.4f}", mean=f"{np.mean(running):.4f}")
 
         print(f"[train] epoch {epoch:03d} mean_loss={np.mean(running):.6f}")
 

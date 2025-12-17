@@ -1,8 +1,8 @@
 from typing import Dict, List, Tuple
 import numpy as np
 
-from config import SafetyConfig, load_config
-from preprocess.io_utils import cfg_get
+from ..config import SafetyConfig, load_config
+from ..preprocess.io_utils import cfg_get
 
 
 def build_feature_tensor(

@@ -1,12 +1,6 @@
-import os
-import sys
 import argparse
 
-_SRC_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
-if _SRC_DIR not in sys.path:
-    sys.path.insert(0, _SRC_DIR)
-
-from config import SafetyConfig, load_config
+from ..config import SafetyConfig, load_config
 
 
 def main():
@@ -25,7 +19,7 @@ def main():
 
     cfg = load_config(args.config) if args.config else SafetyConfig()
     try:
-        from infer.model_io import load_safetynet
+        from .model_io import load_safetynet
     except ModuleNotFoundError as e:
         raise SystemExit(
             "推論に必要な依存関係が見つかりません（torch など）。依存関係をインストールしてください。\n"
@@ -36,7 +30,7 @@ def main():
     model, in_dim, K, device = load_safetynet(args.ckpt, cfg)
 
     try:
-        from infer.pipeline import run_inference
+        from .pipeline import run_inference
     except ModuleNotFoundError as e:
         raise SystemExit(
             "推論に必要な依存関係が見つかりません（torch/ultralytics/opencv-python など）。\n"

@@ -1,0 +1,1 @@
+/content/drive/MyDrive/実験 共有用/train_data_2/npz/image_4/gates-to-clark-2019-02-28_1.npz

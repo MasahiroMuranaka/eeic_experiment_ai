@@ -8,9 +8,9 @@ from typing import List, Optional, Tuple
 import numpy as np
 import torch
 
-from config import SafetyConfig
-from preprocess.io_utils import cfg_get
-from preprocess.camera import estimate_root_xyz_from_bbox
+from ..config import SafetyConfig
+from .io_utils import cfg_get
+from .camera import estimate_root_xyz_from_bbox
 
 
 # Depth Anything V2 (official repo) model configs (README)

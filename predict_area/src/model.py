@@ -1,7 +1,7 @@
 import math
-import torch
-import torch.nn as nn
-import torch.nn.functional as F
+import torch  # type: ignore[import-not-found]
+import torch.nn as nn  # type: ignore[import-not-found]
+import torch.nn.functional as F  # type: ignore[import-not-found]
 
 
 class PersonEncoder(nn.Module):
@@ -39,6 +39,7 @@ class AttentionPool(nn.Module):
         v = self.val(e)
 
         attn_logits = (q * k).sum(dim=-1)  # [B,T,N]
+        # NOTE: mask out padded persons (m=False). Use a large negative value for numerical stability.
         attn_logits = attn_logits.masked_fill(~m, -1e9)
         attn = F.softmax(attn_logits, dim=-1)  # [B,T,N]
         s = (attn.unsqueeze(-1) * v).sum(dim=-2)  # [B,T,E]
@@ -88,6 +89,7 @@ class TemporalEncoder(nn.Module):
         if temporal not in ("gru", "transformer"):
             raise ValueError(f"temporal must be 'gru' or 'transformer', got {temporal}")
         self.temporal = temporal
+        self.posenc: SinusoidalPositionalEncoding | None
 
         if temporal == "gru":
             self.encoder = nn.GRU(
@@ -126,6 +128,7 @@ class TemporalEncoder(nn.Module):
             h = out[:, -1, :]
             return h
         else:
+            assert self.posenc is not None
             x = self.posenc(s)           # [B,T,E]
             out = self.encoder(x)        # [B,T,E]
             h = out[:, -1, :]
@@ -174,15 +177,21 @@ class SafetyNet(nn.Module):
             nn.Linear(256, K),
         )
 
-    def forward(self, X: torch.Tensor, M: torch.Tensor):
+    def forward(self, X: torch.Tensor, M: torch.Tensor) -> torch.Tensor:
         """
         X: [B,T,N,F]
         M: [B,T,N]
-        returns p: [B,K], logits: [B,K]
+        returns logits: [B,K]
         """
         e = self.person(X)      # [B,T,N,E]
         s = self.pool(e, M)     # [B,T,E]
         h = self.temporal(s)    # [B,D]
         logits = self.head(h)   # [B,K]
-        p = torch.softmax(logits, dim=-1)
-        return p, logits
+        return logits
+
+    def predict_proba(self, X: torch.Tensor, M: torch.Tensor) -> torch.Tensor:
+        """
+        Convenience helper for inference/eval.
+        returns p: [B,K]
+        """
+        return torch.softmax(self.forward(X, M), dim=-1)
