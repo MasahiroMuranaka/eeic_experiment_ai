@@ -38,6 +38,7 @@ uv pip install -e .
 python -m src.train \
   --npz-dir /path/to/out_npz_dir \
   --config /path/to/config.yaml \
+  --log-interval 100 \
   --out-ckpt /path/to/out_model.pt
 ```
 

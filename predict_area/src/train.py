@@ -116,6 +116,12 @@ def main():
     ap.add_argument("--num-workers", type=int, default=-1, help="default: macOS=0, otherwise=2")
     ap.add_argument("--pin-memory", action="store_true")
     ap.add_argument("--no-pin-memory", action="store_true", help="force disable pin_memory")
+    ap.add_argument(
+        "--log-interval",
+        type=int,
+        default=100,
+        help="print training progress every N steps (0 to disable)",
+    )
     args = ap.parse_args()
 
     cfg = load_config(args.config) if args.config else SafetyConfig()
@@ -180,6 +186,8 @@ def main():
     for epoch in range(1, cfg.epochs + 1):
         model.train()
         running = []
+        steps_per_epoch = len(dl)
+        print(f"[train] epoch {epoch:03d}/{cfg.epochs} start (steps={steps_per_epoch})")
 
         for step, (X, M, y) in enumerate(dl, start=1):
             X = X.to(device, non_blocking=True)
@@ -196,6 +204,15 @@ def main():
 
             loss_val = float(loss.item())
             running.append(loss_val)
+
+            if args.log_interval > 0 and (step % args.log_interval == 0 or step == 1):
+                # moving average over recent interval (or fewer at the beginning)
+                w = min(len(running), args.log_interval)
+                recent_mean = float(np.mean(running[-w:]))
+                print(
+                    f"[train] epoch {epoch:03d} step {step:06d}/{steps_per_epoch} "
+                    f"loss={loss_val:.6f} mean{w}={recent_mean:.6f}"
+                )
 
         print(f"[train] epoch {epoch:03d} mean_loss={np.mean(running):.6f}")
 

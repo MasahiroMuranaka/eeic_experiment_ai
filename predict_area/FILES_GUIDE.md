@@ -180,7 +180,7 @@ tf_norm_first: true
 - **主要関数**
   - **`set_seed(seed)`**: 乱数シード固定（`random/numpy/torch`）。
   - **`soft_ce_loss(logits, q)`**: soft label `q[B,K]` に対するクロスエントロピー。
-  - **`resolve_npz_paths(train_npz, npz_dir, manifest)`**: 入力npzの解決（優先度: `--train-npz` > `--manifest` > `--npz-dir`）。
+  - **`resolve_npz_paths(train_npz, npz_dir, manifest)`**: 入力npzの解決（優先度: `--train-npz` > `--manifest` > `--npz-dir`）。`--train-npz`/`--npz-dir` は複数指定でき、`.npz` とディレクトリ（再帰展開）を混在可能。
   - **`default_num_workers()`**: macOSは `0`（安定性優先）それ以外は `2`。
   - **`main()`**:
     - **主な引数**: `--train-npz/--npz-dir/--manifest`, `--config`, `--out-ckpt`, `--save-config`, `--num-workers`, `--pin-memory`
