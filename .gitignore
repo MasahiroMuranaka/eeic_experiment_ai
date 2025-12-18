@@ -13,3 +13,5 @@ __pycache__/
 # Macの不要ファイル
 .DS_Store
 # ignore vendored / embedded repo
+make_dataset/
+predict_area/make_npz.py
