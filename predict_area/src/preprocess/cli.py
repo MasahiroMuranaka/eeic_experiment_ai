@@ -2,7 +2,8 @@ import os
 import argparse
 from typing import List
 
-from ..config import SafetyConfig, load_config, save_config
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from config import SafetyConfig, load_config, save_config
 from .io_utils import cfg_get, ensure_dir, list_videos
 
 
