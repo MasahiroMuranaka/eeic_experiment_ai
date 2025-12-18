@@ -2,6 +2,7 @@ import argparse
 import os
 import platform
 import random
+import time
 from typing import Iterable, List
 
 import numpy as np
@@ -9,7 +10,12 @@ import torch  # type: ignore[import-not-found]
 from torch.utils.data import DataLoader  # type: ignore[import-not-found]
 
 from .config import SafetyConfig, load_config, save_config  # type: ignore[import-not-found]
-from .dataset import MultiNpzSafetyDataset, list_npz_in_dir, read_manifest  # type: ignore[import-not-found]
+from .dataset import (  # type: ignore[import-not-found]
+    FileGroupedSampler,
+    MultiNpzSafetyDataset,
+    list_npz_in_dir,
+    read_manifest,
+)
 from .model import SafetyNet  # type: ignore[import-not-found]
 
 
@@ -117,10 +123,25 @@ def main():
     ap.add_argument("--pin-memory", action="store_true")
     ap.add_argument("--no-pin-memory", action="store_true", help="force disable pin_memory")
     ap.add_argument(
+        "--group-by-file",
+        action="store_true",
+        help="use a sampler that keeps samples from the same .npz together (recommended for .npz-compressed datasets)",
+    )
+    ap.add_argument(
+        "--no-group-by-file",
+        action="store_true",
+        help="disable file-grouped sampling and use DataLoader(shuffle=True) instead",
+    )
+    ap.add_argument(
         "--log-interval",
         type=int,
         default=100,
         help="print training progress every N steps (0 to disable)",
+    )
+    ap.add_argument(
+        "--sync-timing",
+        action="store_true",
+        help="synchronize CUDA for more accurate timing logs (slower; useful for debugging GPU usage)",
     )
     args = ap.parse_args()
 
@@ -149,24 +170,47 @@ def main():
     if args.no_pin_memory:
         pin = False
     else:
-        # if user explicitly set --pin-memory, honor it; otherwise default False on CPU-only
-        pin = bool(args.pin_memory)
+        # if user explicitly set --pin-memory, honor it; otherwise default True when CUDA is available
+        pin = bool(args.pin_memory) if args.pin_memory else bool(torch.cuda.is_available())
+
+    # default: enable file-grouped sampling (better locality for np.savez_compressed datasets)
+    use_group = bool(args.group_by_file) if (args.group_by_file or args.no_group_by_file) else True
+    if args.no_group_by_file:
+        use_group = False
+
+    sampler = FileGroupedSampler(ds, seed=cfg.seed) if use_group else None
 
     dl = DataLoader(
         ds,
         batch_size=cfg.batch_size,
-        shuffle=True,
+        shuffle=(sampler is None),
+        sampler=sampler,
         num_workers=nw,
         pin_memory=pin,
         drop_last=True,
+        persistent_workers=(nw > 0),
     )
-    print(f"[train] dataloader ready: batch={cfg.batch_size} num_workers={nw} pin_memory={pin}")
+    print(
+        f"[train] dataloader ready: batch={cfg.batch_size} num_workers={nw} pin_memory={pin} "
+        f"group_by_file={sampler is not None}"
+    )
 
     assert ds.F is not None and ds.K is not None
     in_dim = int(ds.F)
     K = int(ds.K)
 
     device = torch.device(cfg.device if torch.cuda.is_available() else "cpu")
+    if torch.cuda.is_available():
+        try:
+            name = torch.cuda.get_device_name(0)
+        except Exception:
+            name = "unknown"
+        print(
+            f"[train] torch={torch.__version__} torch_cuda={getattr(torch.version, 'cuda', None)} "
+            f"cuda_available=True device={device} gpu0={name}"
+        )
+    else:
+        print(f"[train] torch={torch.__version__} cuda_available=False device={device}")
     model_kwargs = {
         "emb_dim": int(getattr(cfg, "emb_dim", 128)),
         "temporal": str(getattr(cfg, "temporal_model", "gru")),
@@ -189,10 +233,26 @@ def main():
         steps_per_epoch = len(dl)
         print(f"[train] epoch {epoch:03d}/{cfg.epochs} start (steps={steps_per_epoch})")
 
+        if sampler is not None:
+            sampler.set_epoch(epoch)
+
+        t_prev = time.perf_counter()
+        data_s, step_s = 0.0, 0.0
+
         for step, (X, M, y) in enumerate(dl, start=1):
+            t0 = time.perf_counter()
+            data_s += (t0 - t_prev)
+
             X = X.to(device, non_blocking=True)
             M = M.to(device, non_blocking=True)
             y = y.to(device, non_blocking=True)
+
+            if step == 1:
+                try:
+                    pdev = next(model.parameters()).device
+                except StopIteration:
+                    pdev = torch.device("cpu")
+                print(f"[train] debug devices: X={X.device} M={M.device} y={y.device} model={pdev}")
 
             logits = model(X, M)
             loss = soft_ce_loss(logits, y)
@@ -202,16 +262,26 @@ def main():
             torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
             opt.step()
 
+            if args.sync_timing and torch.cuda.is_available():
+                torch.cuda.synchronize()
+
             loss_val = float(loss.item())
             running.append(loss_val)
+
+            t1 = time.perf_counter()
+            step_s += (t1 - t0)
+            t_prev = t1
 
             if args.log_interval > 0 and (step % args.log_interval == 0 or step == 1):
                 # moving average over recent interval (or fewer at the beginning)
                 w = min(len(running), args.log_interval)
                 recent_mean = float(np.mean(running[-w:]))
+                mean_data = (data_s / float(step)) if step > 0 else 0.0
+                mean_step = (step_s / float(step)) if step > 0 else 0.0
                 print(
                     f"[train] epoch {epoch:03d} step {step:06d}/{steps_per_epoch} "
-                    f"loss={loss_val:.6f} mean{w}={recent_mean:.6f}"
+                    f"loss={loss_val:.6f} mean{w}={recent_mean:.6f} "
+                    f"time(data/step)={mean_data:.4f}s time(step)={mean_step:.4f}s"
                 )
 
         print(f"[train] epoch {epoch:03d} mean_loss={np.mean(running):.6f}")

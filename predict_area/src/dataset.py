@@ -1,9 +1,9 @@
 import os
-from typing import List, Optional, Tuple
+from typing import Iterator, List, Optional, Tuple
 
 import numpy as np
 import torch
-from torch.utils.data import Dataset
+from torch.utils.data import Dataset, Sampler
 
 
 class MultiNpzSafetyDataset(Dataset):
@@ -105,6 +105,63 @@ class MultiNpzSafetyDataset(Dataset):
         M = torch.from_numpy(self._cache_M[local_i])  # [T,Nmax]
         y = torch.from_numpy(self._cache_y[local_i])  # [K]
         return X, M, y
+
+
+class FileGroupedSampler(Sampler[int]):
+    """
+    Sampler that preserves file locality for MultiNpzSafetyDataset.
+
+    Why: when DataLoader(shuffle=True) is used on a multi-npz dataset, it tends to jump across files
+    every sample, forcing repeated np.load (zip decompression) and making GPU mostly idle.
+
+    This sampler yields indices grouped by file (optionally shuffled at file level, and shuffled within each file).
+    """
+
+    def __init__(
+        self,
+        ds: MultiNpzSafetyDataset,
+        *,
+        shuffle_files: bool = True,
+        shuffle_within_file: bool = True,
+        seed: int = 42,
+    ):
+        if not isinstance(ds, MultiNpzSafetyDataset):
+            raise TypeError("FileGroupedSampler expects a MultiNpzSafetyDataset")
+        self.ds = ds
+        self.shuffle_files = bool(shuffle_files)
+        self.shuffle_within_file = bool(shuffle_within_file)
+        self.seed = int(seed)
+        self.epoch = 0
+
+    def set_epoch(self, epoch: int) -> None:
+        self.epoch = int(epoch)
+
+    def __len__(self) -> int:
+        return int(len(self.ds))
+
+    def __iter__(self) -> Iterator[int]:
+        n_files = len(self.ds.lengths)
+        g = torch.Generator()
+        g.manual_seed(int(self.seed + self.epoch))
+
+        if self.shuffle_files:
+            file_order = torch.randperm(n_files, generator=g).tolist()
+        else:
+            file_order = list(range(n_files))
+
+        for file_i in file_order:
+            start = int(self.ds.prefix[file_i])
+            n = int(self.ds.lengths[file_i])
+            if n <= 0:
+                continue
+
+            if self.shuffle_within_file:
+                local_order = torch.randperm(n, generator=g).tolist()
+            else:
+                local_order = list(range(n))
+
+            for local_i in local_order:
+                yield start + int(local_i)
 
 
 def list_npz_in_dir(npz_dir: str) -> List[str]:
