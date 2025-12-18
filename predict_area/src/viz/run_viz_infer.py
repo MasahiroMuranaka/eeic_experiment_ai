@@ -2,6 +2,13 @@ import os
 import argparse
 import numpy as np
 import cv2
+from pathlib import Path
+import sys
+
+# ensure project src and viz directories are on sys.path so local modules can be imported
+this_file = Path(__file__).resolve()
+sys.path.insert(0, str(this_file.parent))
+sys.path.insert(0, str(this_file.parent.parent))
 
 from create_answer import get_answer_from_video
 from viz2 import load_prob_sequence, overlay_heatmap_from_grid, overlay_safe_area

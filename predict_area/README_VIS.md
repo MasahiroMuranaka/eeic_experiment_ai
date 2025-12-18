@@ -1,14 +1,14 @@
 ## ファイル一覧（目的）
-- `predict_area/src/viz/viz2.py` — 可視化ユーティリティ
-- `predict_area/src/viz/create_answer.py` — 動画/検出 JSON からフレーム毎の確率分布を生成するロジック（動画対応を追加）
-- `predict_area/src/viz/run_viz_infer.py` — 動画と `.npz` を受け取りオーバーレイ動画を生成するランナー
-- `predict_area/src/viz/run_detect_and_create_answer.py` — Ultralytics YOLO を用いて動画→検出 JSON を作成し、`.npz` を生成する一括ランナー
+- `predict_area/src/infer/viz2.py` — 可視化ユーティリティ
+- `predict_area/src/infer/create_answer.py` — 動画/検出 JSON からフレーム毎の確率分布を生成するロジック（動画対応を追加）
+- `predict_area/src/infer/run_viz_infer.py` — 動画と `.npz` を受け取りオーバーレイ動画を生成するランナー
+- `predict_area/src/infer/run_detect_and_create_answer.py` — Ultralytics YOLO を用いて動画→検出 JSON を作成し、`.npz` を生成する一括ランナー
 
 ---
 
 ## ファイル詳細と関数ドキュメント
 
-- ファイル: [predict_area/src/viz/viz2.py](predict_area/src/viz/viz2.py)
+- ファイル: [predict_area/src/infer/viz2.py](predict_area/src/infer/viz2.py)
   - 目的: フレームに対する確率分布（1D/2D）を読み込み、ヒートマップ合成や「最も安全」セルの矩形描画を行うユーティリティ群。
   - 関数:
     - `load_prob_sequence(path: str) -> np.ndarray`
@@ -42,7 +42,7 @@
       - 返り値: `(out_frame, (x1,y1,x2,y2))` — 矩形描画した画像と矩形座標
       - 動作: `prob` の最大セルを選択し、フレーム上の対応ブロックを矩形で描画する。
 
-- ファイル: [predict_area/src/viz/create_answer.py](predict_area/src/viz/create_answer.py)
+- ファイル: [predict_area/src/infer/create_answer.py](predict_area/src/infer/create_answer.py)
   - 目的: 既存の検出データ（画像バッチ用の JSON）や動画の検出 JSON を受け、各フレームごとに K 分割した領域ごとの安全確率（分布）を計算して返す。今回、動画対応の `get_answer_from_video` を追加/拡張した。
   - 関数:
     - `calc_answer(box_list, score_list, num_area, im_w) -> List[float]`
@@ -61,7 +61,7 @@
       - 返り値: `{ "{frame_idx}.jpg": [p0, p1, ..., p_{K-1}] }` の辞書（各フレームの確率配列）
       - 動作: `detections_json` が無い/そのフレームに検出が無い場合は一様分布を返す。動画をフレーム単位で読みながら `calc_answer` を適用する。
 
-- ファイル: [predict_area/src/viz/run_viz_infer.py](predict_area/src/viz/run_viz_infer.py)
+- ファイル: [predict_area/src/infer/run_viz_infer.py](predict_area/src/infer/run_viz_infer.py)
   - 目的: 動画と `.npz`（確率配列）を受け取り、各フレームに `overlay_safe_area` を適用してオーバーレイ動画を書き出す。`.npz` が無ければ `get_answer_from_video` で生成する簡易ランナー。
   - 関数:
     - `run(video_path: str, probs_npz: str, out_path: str, num_area: int, detections_json: str = None) -> None`
@@ -73,7 +73,7 @@
         - `detections_json`: 生成時に使う検出 JSON
       - 返り値: なし（ファイル出力: out_path へ動画を書き出す）
 
-- ファイル: [predict_area/src/viz/run_detect_and_create_answer.py](predict_area/src/viz/run_detect_and_create_answer.py)
+- ファイル: [predict_area/src/infer/run_detect_and_create_answer.py](predict_area/src/infer/run_detect_and_create_answer.py)
   - 目的: Ultralytics YOLO モデルを使って動画をフレーム単位に検出・追跡し、`detect_json` を出力、続けて `get_answer_from_video` を呼んで `.npz` を保存するワンステップスクリプト。
   - 関数:
     - `detect_video_to_json(video_path: str, model_path: str, out_json: str, conf: float = 0.25, iou: float = 0.5, tracker: str = "bytetrack.yaml") -> str`
@@ -100,19 +100,19 @@ pip install ultralytics
 2) YOLO 検出 → `.npz` 生成（モデルファイル `yolov8n-pose.pt` がリポジトリにある前提）
 
 ```powershell
-python predict_area/src/viz/run_detect_and_create_answer.py --video predict_area/data/train_data/data_1.mp4 --model yolov8n-pose.pt --out_json predict_area/detections/data_1_detections.json --out_npz npz/test_npz/data_1_from_detect.npz --num_area 8
+python predict_area/src/infer/run_detect_and_create_answer.py --video predict_area/data/train_data/data_1.mp4 --model yolov8n-pose.pt --out_json predict_area/detections/data_1_detections.json --out_npz npz/test_npz/data_1_from_detect.npz --num_area 8
 ```
 
 3) 生成済み `.npz` を使ってオーバーレイ動画を作る
 
 ```powershell
-python predict_area/src/viz/run_viz_infer.py --video predict_area/data/train_data/data_1.mp4 --probs npz/test_npz/data_1_from_detect.npz --out predict_area/result/test_result/data_1_detect_overlay.mp4 --num_area 8
+python predict_area/src/infer/run_viz_infer.py --video predict_area/data/train_data/data_1.mp4 --probs npz/test_npz/data_1_from_detect.npz --out predict_area/result/test_result/data_1_detect_overlay.mp4 --num_area 8
 ```
 
 4) （ヒートマップ表示を確認したい場合）`viz2.py` のデモを単独で実行
 
 ```powershell
-python predict_area/src/viz/viz2.py --out viz2_demo.mp4 --w 640 --h 360
+python predict_area/src/infer/viz2.py --out viz2_demo.mp4 --w 640 --h 360
 ```
 
 ---
