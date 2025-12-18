@@ -21,10 +21,12 @@ def load_data_map(path: str) -> Dict[int, np.ndarray]:
     try:
         if ext == '.csv':
             # CSVは行=フレームとみなす
-            data = np.loadtxt(path, delimiter=',')
+            # 一行目はヘッダを想定
+            # 一番左はフレーム番号を想定
+            data = np.loadtxt(path, delimiter=',', skiprows=1)
             if data.ndim == 1: data = data[np.newaxis, :]
             for i, row in enumerate(data):
-                mapping[i] = row
+                mapping[i] = row[1:]
 
         elif ext == '.npy':
             data = np.load(path)
@@ -120,6 +122,9 @@ def create_viz_videos(video_path, model_path, answer_path):
         use_video = False
 
         image_paths = glob.glob(os.path.join(video_path, "*.jpg"))
+        # 順序が昇順になるようにソート
+        image_paths = sorted(image_paths, key=lambda p: int(os.path.splitext(os.path.basename(p))[0]))
+
         for path in image_paths:
             frames.append(cv2.imread(path))
 
