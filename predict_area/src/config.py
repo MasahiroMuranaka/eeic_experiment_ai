@@ -51,7 +51,7 @@ class SafetyConfig:
     depth_anything_max_depth: float = 20.0
 
     # ===== Training =====
-    batch_size: int = 32
+    batch_size: int = 64
     lr: float = 3e-4
     weight_decay: float = 1e-4
     epochs: int = 20

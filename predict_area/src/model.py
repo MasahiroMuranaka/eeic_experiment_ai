@@ -170,7 +170,9 @@ class SafetyNet(nn.Module):
         )
         self.head = nn.Sequential(
             nn.Linear(self.temporal.out_dim, 256),
+            nn.LayerNorm(256),
             nn.GELU(),
+            nn.Dropout(0.1),
             nn.Linear(256, K),
         )
 
