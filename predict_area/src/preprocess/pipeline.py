@@ -163,7 +163,7 @@ def preprocess_one_video(
 
     out_csv = os.path.join(out_dir, f"{base}.csv")
     save_tracking_csv(out_csv, frames_state, frames_ego, fps)
-    run_stgcnn_auto(out_csv)
+    run_stgcnn_save_separate(out_csv, out_dir, base)
     
     try:
         build_npz_from_video_buffers(
@@ -285,24 +285,21 @@ def save_tracking_csv(
         print(f"[preprocess] Saved CSV: {csv_path}")
     except Exception as e:
         print(f"[preprocess] Failed to save CSV: {e}")
-
-# --- Social-STGCNN Auto-Implementation (Append to bottom of pipeline.py) ---
+        
+# --- Social-STGCNN Logic (Separate NPZ Output) ---
 
 class SimpleSTGCNN(nn.Module):
-    """簡易版 Social-STGCNN モデル"""
     def __init__(self, n_nodes, obs_len, pred_len, input_feat=2, kernel_size=3):
         super(SimpleSTGCNN, self).__init__()
         self.n_nodes = n_nodes
         self.obs_len = obs_len
         self.pred_len = pred_len
         
-        # 空間畳み込み (簡易グラフ畳み込み)
         self.conv_spatial = nn.Sequential(
             nn.Conv2d(input_feat, 64, kernel_size=1),
             nn.ReLU(),
             nn.BatchNorm2d(64)
         )
-        # 時間畳み込み
         self.conv_temporal = nn.Sequential(
             nn.Conv2d(64, 128, kernel_size=(1, kernel_size), padding=(0, 1)),
             nn.ReLU(),
@@ -310,25 +307,23 @@ class SimpleSTGCNN(nn.Module):
             nn.Conv2d(128, 64, kernel_size=(1, kernel_size), padding=(0, 1)),
             nn.ReLU()
         )
-        # 軌跡予測出力層 (平均と分散を出力するが今回は座標のみ予測)
-        self.output_layer = nn.Conv2d(64, 2, kernel_size=1) # output (x, y)
+        self.output_layer = nn.Conv2d(64, 2, kernel_size=1)
 
     def forward(self, v):
-        # v: (Batch, Feat, Nodes, Time)
         x = self.conv_spatial(v)
         x = self.conv_temporal(x)
-        # 時間次元を圧縮して未来を予測
         x = torch.mean(x, dim=3, keepdim=True) 
-        out = self.output_layer(x) # (Batch, 2, Nodes, 1)
-        
-        # 未来のステップ数分だけ単純線形補間で拡張 (簡易実装のため)
-        # 本来はRNNやTCNで再帰的に出すが、ここではデモ用に簡略化
+        out = self.output_layer(x)
         out = out.repeat(1, 1, 1, self.pred_len)
         return out
 
-def run_stgcnn_auto(csv_path):
-    """CSVを読み込み、STGCNNを学習し、推論結果を保存する"""
-    print(f"[STGCNN] Starting auto-training for {csv_path}...")
+def run_stgcnn_save_separate(csv_path, out_dir, base_name):
+    """
+    STGCNNを実行し、結果を独立したNPZファイルとして保存する。
+    保存形式は正規のNPZ (N, T, Nmax, F) に揃える。
+    """
+    target_npz = os.path.join(out_dir, f"{base_name}_stgcnn.npz")
+    print(f"[STGCNN] Creating separate prediction file: {target_npz}")
     
     # 1. データ読み込み
     try:
@@ -338,107 +333,102 @@ def run_stgcnn_auto(csv_path):
         print(f"[STGCNN] Error loading CSV: {e}")
         return
 
-    # 必要なカラム (root_x, root_z) を使用
-    # track_idごとにデータをまとめる
     track_ids = df['track_id'].unique()
     if len(track_ids) == 0:
         return
 
-    # データをテンソル化 (Batch=1, Feat=2, Nodes=N, Time=T)
-    # 簡易化のため、一番長い系列に合わせてゼロパディング
+    # 設定 (正規のNPZに合わせるパラメータ)
+    obs_len = 8    # T
+    pred_len = 12  # H (予測先)
+    Nmax = 10      # 正規のフォーマットに合わせる人数
+    
     max_len = df.groupby('track_id').size().max()
-    if max_len < 10:
-        print("[STGCNN] Data too short for training. Skipping.")
+    if max_len <= obs_len + pred_len:
+        print("[STGCNN] Sequence too short.")
         return
 
-    n_nodes = len(track_ids)
-    input_tensor = np.zeros((1, 2, n_nodes, max_len))
-    
-    # IDマッピング
+    n_nodes_total = len(track_ids)
+    input_tensor = np.zeros((2, n_nodes_total, max_len)) 
     id_map = {tid: i for i, tid in enumerate(track_ids)}
     
+    use_z = 'root_z' in df.columns
     for tid in track_ids:
         idx = id_map[tid]
         group = df[df['track_id'] == tid].sort_values('frame_id')
-        # x, z (Top-down view)
-        coords = group[['root_x', 'root_z']].values.T # (2, Time)
+        if use_z:
+            coords = group[['root_x', 'root_z']].values.T
+        else:
+            coords = group[['x', 'y']].values.T
         length = coords.shape[1]
-        input_tensor[0, :, idx, :length] = coords
+        input_tensor[:, idx, :length] = coords
 
-    # 学習用設定
-    obs_len = 8   # 観察フレーム数
-    pred_len = 12 # 予測フレーム数
+    # 2. 学習 & 推論
+    data_tensor = torch.tensor(input_tensor, dtype=torch.float32).unsqueeze(0) 
     
-    if max_len <= obs_len + pred_len:
-        print("[STGCNN] Sequence too short. Skipping.")
-        return
+    model = SimpleSTGCNN(n_nodes=n_nodes_total, obs_len=obs_len, pred_len=pred_len)
+    optimizer = optim.Adam(model.parameters(), lr=0.01)
+    criterion = nn.MSELoss()
 
-    # PyTorchテンソル変換
-    data_tensor = torch.tensor(input_tensor, dtype=torch.float32) # (1, 2, N, T)
-    
-    # 学習データの作成 (スライディングウィンドウ)
-    X_train_list = []
-    Y_train_list = []
-    
+    X_train_list, Y_train_list = [], []
     for i in range(max_len - obs_len - pred_len):
         X_train_list.append(data_tensor[:, :, :, i : i+obs_len])
         Y_train_list.append(data_tensor[:, :, :, i+obs_len : i+obs_len+pred_len])
     
-    if not X_train_list:
-        return
+    if X_train_list:
+        X_train = torch.cat(X_train_list, dim=0)
+        Y_train = torch.cat(Y_train_list, dim=0)
+        model.train()
+        for _ in range(5):
+            optimizer.zero_grad()
+            output = model(X_train)
+            loss = criterion(output, Y_train)
+            loss.backward()
+            optimizer.step()
 
-    X_train = torch.cat(X_train_list, dim=0) # (Batch, 2, N, 8)
-    Y_train = torch.cat(Y_train_list, dim=0) # (Batch, 2, N, 12)
-
-    # 2. モデル構築
-    model = SimpleSTGCNN(n_nodes=n_nodes, obs_len=obs_len, pred_len=pred_len)
-    optimizer = optim.Adam(model.parameters(), lr=0.01)
-    criterion = nn.MSELoss()
-
-    # 3. 学習ループ (超高速完了のため5エポック)
-    model.train()
-    print("[STGCNN] Training model...")
-    for epoch in range(5):
-        optimizer.zero_grad()
-        output = model(X_train)
-        loss = criterion(output, Y_train)
-        loss.backward()
-        optimizer.step()
-        # print(f"Epoch {epoch+1}, Loss: {loss.item()}")
-
-    # 4. 推論 (最後のフレームから未来を予測)
+    # 3. フォーマット整形 [Samples, T, Nmax, F]
     model.eval()
-    last_obs = data_tensor[:, :, :, -obs_len:] # 最後の8フレーム
-    if last_obs.shape[3] < obs_len:
-        # 足りない場合はパディング
-        pad = torch.zeros((1, 2, n_nodes, obs_len - last_obs.shape[3]))
-        last_obs = torch.cat([last_obs, pad], dim=3)
-
-    with torch.no_grad():
-        future_pred = model(last_obs) # (1, 2, N, 12)
-
-    # 5. 結果保存
-    # 予測結果をCSV形式に戻す
-    pred_numpy = future_pred.numpy()[0] # (2, N, 12)
-    pred_rows = []
     
-    start_frame = df['frame_id'].max() + 1
-    
-    for t in range(pred_len):
-        frame_id = start_frame + t
-        for tid in track_ids:
-            idx = id_map[tid]
-            x_pred = pred_numpy[0, idx, t]
-            z_pred = pred_numpy[1, idx, t]
+    X_list = []    # Input Features
+    M_list = []    # Mask
+    Pred_list = [] # Prediction Features
+
+    for t in range(obs_len, max_len):
+        input_window = data_tensor[:, :, :, t-obs_len:t]
+        
+        with torch.no_grad():
+            output_traj = model(input_window)
             
-            # 予測値が0,0 (パディング領域) なら無視する簡易フィルタ
-            if x_pred == 0 and z_pred == 0:
-                continue
+        # Nmax人まででカットして整形
+        last_pos = input_window[0, :, :, -1] 
+        valid_indices = []
+        for n_idx in range(n_nodes_total):
+            if not (last_pos[0, n_idx] == 0 and last_pos[1, n_idx] == 0):
+                valid_indices.append(n_idx)
+        
+        valid_indices = valid_indices[:Nmax]
+        
+        X_frame = np.zeros((obs_len, Nmax, 2), dtype=np.float32)
+        M_frame = np.zeros((obs_len, Nmax), dtype=bool)
+        Pred_frame = np.zeros((pred_len, Nmax, 2), dtype=np.float32)
 
-            pred_rows.append([frame_id, tid, x_pred, z_pred])
-            
-    out_pred_path = csv_path.replace(".csv", "_prediction.csv")
-    pred_df = pd.DataFrame(pred_rows, columns=["frame_id", "track_id", "pred_x", "pred_z"])
-    pred_df.to_csv(out_pred_path, index=False)
-    
-    print(f"[STGCNN] Prediction saved to: {out_pred_path}")
+        raw_obs = input_window.numpy()[0]
+        raw_pred = output_traj.numpy()[0]
+
+        for i, n_idx in enumerate(valid_indices):
+            X_frame[:, i, :] = raw_obs[:, n_idx, :].T
+            M_frame[:, i] = True
+            Pred_frame[:, i, :] = raw_pred[:, n_idx, :].T
+
+        X_list.append(X_frame)
+        M_list.append(M_frame)
+        Pred_list.append(Pred_frame)
+
+    # 4. 別ファイルとして保存
+    np.savez_compressed(
+        target_npz,
+        data=np.array(X_list),      # X [Samples, 8, 10, 2]
+        mask=np.array(M_list),      # M [Samples, 8, 10]
+        prediction=np.array(Pred_list), # Pred [Samples, 12, 10, 2]
+        track_ids=track_ids
+    )
+    print(f"[STGCNN] Saved separate NPZ: {target_npz}")
