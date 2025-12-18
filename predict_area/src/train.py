@@ -2,7 +2,7 @@ import argparse
 import os
 import platform
 import random
-from typing import List
+from typing import Iterable, List
 
 import numpy as np
 import torch  # type: ignore[import-not-found]
@@ -27,18 +27,60 @@ def soft_ce_loss(logits: torch.Tensor, q: torch.Tensor) -> torch.Tensor:
     return -(q * logp).sum(dim=-1).mean()
 
 
-def resolve_npz_paths(train_npz: str, npz_dir: str, manifest: str) -> List[str]:
+def _unique_keep_order(xs: Iterable[str]) -> List[str]:
+    out: List[str] = []
+    seen = set()
+    for x in xs:
+        if x in seen:
+            continue
+        out.append(x)
+        seen.add(x)
+    return out
+
+
+def _norm_path(p: str) -> str:
+    return os.path.abspath(os.path.expanduser(p))
+
+
+def _expand_npz_inputs(inputs: List[str]) -> List[str]:
+    """
+    Accept a mix of:
+      - .npz file paths
+      - directories (recursively expanded to .npz files)
+    """
+    out: List[str] = []
+    for raw in inputs:
+        if not raw:
+            continue
+        p = _norm_path(raw)
+        if os.path.isdir(p):
+            out.extend(list_npz_in_dir(p))
+            continue
+        if not os.path.exists(p):
+            raise SystemExit(f"path not found: {raw}")
+        if not p.lower().endswith(".npz"):
+            raise SystemExit(f"not an .npz file: {raw}")
+        out.append(p)
+    return out
+
+
+def resolve_npz_paths(train_npz: List[str], npz_dir: List[str], manifest: str) -> List[str]:
     if train_npz:
-        return [train_npz]
+        paths = _expand_npz_inputs(train_npz)
+        paths = _unique_keep_order(paths)
+        if not paths:
+            raise SystemExit("--train-npz resolved to empty list")
+        return paths
     if manifest:
-        paths = read_manifest(manifest)
+        paths = [_norm_path(p) for p in read_manifest(manifest)]
         if not paths:
             raise SystemExit(f"manifest is empty: {manifest}")
-        return paths
+        return _unique_keep_order(paths)
     if npz_dir:
-        paths = list_npz_in_dir(npz_dir)
+        paths = _expand_npz_inputs(npz_dir)
+        paths = _unique_keep_order(paths)
         if not paths:
-            raise SystemExit(f"no npz found in dir: {npz_dir}")
+            raise SystemExit(f"no npz found in: {npz_dir}")
         return paths
     raise SystemExit("one of --train-npz / --manifest / --npz-dir is required")
 
@@ -52,8 +94,18 @@ def default_num_workers() -> int:
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--train-npz", default="", help="single npz path (legacy)")
-    ap.add_argument("--npz-dir", default="", help="directory containing multiple npz (recursive)")
+    ap.add_argument(
+        "--train-npz",
+        nargs="+",
+        default=[],
+        help="one or more .npz paths (can also pass a directory to expand recursively)",
+    )
+    ap.add_argument(
+        "--npz-dir",
+        nargs="+",
+        default=[],
+        help="one or more directories containing multiple npz (recursive); .npz files are also accepted",
+    )
     ap.add_argument("--manifest", default="", help="manifest.txt that lists npz paths (one per line)")
 
     ap.add_argument("--config", default="")
