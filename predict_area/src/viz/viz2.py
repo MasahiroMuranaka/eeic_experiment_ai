@@ -4,6 +4,7 @@ import re
 import cv2
 import numpy as np
 from typing import Dict, Tuple, Optional, Union
+import glob
 
 def load_data_map(path: str) -> Dict[int, np.ndarray]:
     """
@@ -102,16 +103,32 @@ def create_viz_videos(video_path, model_path, answer_path):
     model_map = load_data_map(model_path)
     answer_map = load_data_map(answer_path)
     
-    # 2. 動画準備
-    cap = cv2.VideoCapture(video_path)
-    if not cap.isOpened():
-        raise IOError(f"Cannot open video: {video_path}")
+    # 2. 動画or画像準備
+    use_video = True
+    frames = []
+    if os.path.isfile(video_path):
+        cap = cv2.VideoCapture(video_path)
+        if not cap.isOpened():
+            raise IOError(f"Cannot open video: {video_path}")
+            
+        fps = cap.get(cv2.CAP_PROP_FPS) or 30.0
+        w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+        h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
         
-    fps = cap.get(cv2.CAP_PROP_FPS) or 30.0
-    w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-    h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+        base = os.path.splitext(os.path.basename(video_path))[0]
+    else:
+        use_video = False
+
+        image_paths = glob.glob(os.path.join(video_path, "*.jpg"))
+        for path in image_paths:
+            frames.append(cv2.imread(path))
+
+        fps = 15.0
+        w = frames[0].shape[1]
+        h = frames[0].shape[0]
+
+        base = os.path.basename(video_path)
     
-    base = os.path.splitext(os.path.basename(video_path))[0]
     out_model = f"{base}_model_overlay.mp4"
     out_answ = f"{base}_answer_overlay.mp4"
     out_side = f"{base}_side_by_side.mp4"
@@ -144,9 +161,15 @@ def create_viz_videos(video_path, model_path, answer_path):
     
     frame_idx = 0
     while True:
-        ret, frame = cap.read()
-        if not ret:
-            break
+        if use_video:
+            ret, frame = cap.read()
+            if not ret:
+                break
+        else:
+            if frame_idx < len(frames) -  1:
+                frame = frames[frame_idx]
+            else:
+                break
             
         frame_m = frame.copy()
         frame_a = frame.copy()
@@ -175,7 +198,8 @@ def create_viz_videos(video_path, model_path, answer_path):
         if frame_idx % 100 == 0:
             print(f"Processed {frame_idx} frames...")
 
-    cap.release()
+    if use_video:
+        cap.release()
     writer_m.release()
     writer_a.release()
     writer_s.release()
