@@ -1,14 +1,9 @@
 import os
-import sys
 import argparse
 from typing import List
 
-_SRC_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
-if _SRC_DIR not in sys.path:
-    sys.path.insert(0, _SRC_DIR)
-
-from config import SafetyConfig, load_config, save_config  # noqa: E402
-from preprocess.io_utils import cfg_get, ensure_dir, list_videos  # noqa: E402
+from ..config import SafetyConfig, load_config, save_config
+from .io_utils import cfg_get, ensure_dir, list_videos
 
 
 def write_manifest(out_dir: str, npz_paths: List[str]) -> str:
@@ -56,7 +51,7 @@ def main():
     yolo_pose_model = YOLO(pose_model_path)
 
     try:
-        from preprocess.pipeline import preprocess_one_video
+        from .pipeline import preprocess_one_video
     except ModuleNotFoundError as e:
         raise SystemExit(
             "前処理に必要な依存関係が見つかりません（opencv-python など）。依存関係をインストールしてください。\n"
@@ -66,7 +61,7 @@ def main():
 
     npz_paths: List[str] = []
     if args.frames_dir:
-        from preprocess.pipeline import preprocess_one_frames_dir
+        from .pipeline import preprocess_one_frames_dir
 
         print(f"[preprocess] processing frames_dir: {args.frames_dir}")
         out_npz = preprocess_one_frames_dir(

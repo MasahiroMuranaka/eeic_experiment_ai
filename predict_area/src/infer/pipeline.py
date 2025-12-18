@@ -5,7 +5,7 @@ from __future__ import annotations
 import os
 import argparse
 from collections import deque
-from typing import Dict, Optional, Tuple
+from typing import Dict, Iterator
 
 import json
 import cv2
@@ -24,6 +24,7 @@ from ..preprocess.frame_source import iter_frames_from_dir, read_first_frame
 from .features import build_feature_tensor
 from ..model import SafetyNet
 from .model_io import load_safetynet
+from .outputs import open_csv
 
 
 def draw_prob_bar(frame: np.ndarray, p: np.ndarray, x0=20, y0=40, w=320, h=12) -> np.ndarray:
@@ -50,6 +51,7 @@ def run_inference(
     device: torch.device,
     safety_model: SafetyNet,
     out_video: str = "",
+    out_csv: str = "",
     out_json: str = "",
     show: bool = False,
     max_frames: int = 0,
@@ -66,7 +68,7 @@ def run_inference(
     - cfg: SafetyConfig（preprocess/train と同一設定であること）
     - device: 推論に使うdevice
     - safety_model: `SafetyNet`（すでに重みロード済み）
-    - out_video/out_csv/show/max_frames: 出力制御
+    - out_video/out_csv/out_json/show/max_frames: 出力制御
     """
     model = safety_model
     model.eval()
@@ -91,12 +93,12 @@ def run_inference(
         width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH) or 0)
         height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT) or 0)
         fps = float(cap.get(cv2.CAP_PROP_FPS) or float(cfg_get(cfg, "fps", 30.0)) or 30.0)
-        frame_iter = None
+        frame_iter: Iterator[tuple[int, str, np.ndarray]] | None = None
     else:
         first_name, first_frame = read_first_frame(frames_dir)
         height, width = int(first_frame.shape[0]), int(first_frame.shape[1])
         fps = float(fps_override) if fps_override and fps_override > 0 else float(cfg_get(cfg, "fps", 30.0)) or 30.0
-        frame_iter = iter_frames_from_dir(frames_dir, max_frames=max_frames)
+        frame_iter = iter(iter_frames_from_dir(frames_dir, max_frames=max_frames))
 
     # camera + pose params
     fov_y_deg = float(cfg_get(cfg, "fov_y_deg", 60.0))
@@ -130,14 +132,15 @@ def run_inference(
     writer = None
     if out_video:
         os.makedirs(os.path.dirname(out_video) or ".", exist_ok=True)
-        fourcc = cv2.VideoWriter_fourcc(*"mp4v")
+        fourcc = cv2.VideoWriter_fourcc(*"mp4v")  # type: ignore[attr-defined]
         writer = cv2.VideoWriter(out_video, fourcc, fps, (width, height))
+
+    csv_f = open_csv(out_csv, K) if out_csv else None
 
     json_f = None
     if out_json:
         os.makedirs(os.path.dirname(out_json) or ".", exist_ok=True)
         json_f = open(out_json, "w", encoding="utf-8")
-        ## csv_f.write("frame," + ",".join([f"p{k}" for k in range(K)]) + "\n")
 
     frame_idx = 0
     infer_result = {}
@@ -145,6 +148,7 @@ def run_inference(
         while True:
             frame_name = f"{frame_idx}.json"
             if frame_iter is None:
+                assert cap is not None
                 ret, frame = cap.read()
                 if not ret:
                     break
@@ -152,7 +156,7 @@ def run_inference(
                     break
             else:
                 try:
-                    _, _, frame = next(frame_iter)  # type: ignore[assignment]
+                    _, _, frame = next(frame_iter)
                 except StopIteration:
                     break
 
@@ -239,8 +243,9 @@ def run_inference(
                     cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2
                 )
                 out_frame = draw_prob_bar(out_frame, p, x0=20, y0=40, w=360, h=14)
+                if csv_f is not None:
+                    csv_f.write(str(frame_idx) + "," + ",".join([f"{float(v):.6f}" for v in p]) + "\n")
                 if json_f is not None:
-                    ## csv_f.write(str(frame_idx) + "," + ",".join([f"{float(v):.6f}" for v in p]) + "\n")
                     infer_result[frame_name] = [float(v) for v in p]
 
             if writer is not None:
@@ -261,6 +266,8 @@ def run_inference(
             cap.release()
         if writer is not None:
             writer.release()
+        if csv_f is not None:
+            csv_f.close()
         if json_f is not None:
             json.dump(infer_result, json_f, indent=3)
             json_f.close()
@@ -270,8 +277,74 @@ def run_inference(
     print("[infer] done.")
     if out_video:
         print(f"[infer] wrote video: {out_video}")
+    if out_csv:
+        print(f"[infer] wrote csv: {out_csv}")
     if out_json:
         print(f"[infer] wrote json: {out_json}")
+
+
+@torch.no_grad()
+def run_inference_npz(
+    npz_path: str,
+    ckpt_in_dim: int,
+    K: int,
+    device: torch.device,
+    safety_model: SafetyNet,
+    out_csv: str,
+) -> None:
+    """
+    .npz (features) から直接推論する。
+
+    想定:
+      - X: [N,T,Nmax,F] or [T,Nmax,F]
+      - M: [N,T,Nmax]  or [T,Nmax]
+    """
+    if not out_csv:
+        raise ValueError("--out-csv is required for --npz inference")
+
+    z = np.load(npz_path, allow_pickle=True)
+    files = set(z.files)
+
+    if "X" in files and "M" in files:
+        X_np = z["X"]
+        M_np = z["M"]
+    elif "arr_0" in files:
+        # fallback: np.savez without explicit keys
+        X_np = z["arr_0"]
+        if "arr_1" not in files:
+            raise KeyError(f"{npz_path} must contain M (key 'M' or 'arr_1')")
+        M_np = z["arr_1"]
+    else:
+        raise KeyError(f"{npz_path} must contain X/M (keys: {sorted(list(files))})")
+
+    if X_np.ndim == 3:
+        X_np = X_np[None, ...]
+    if M_np.ndim == 2:
+        M_np = M_np[None, ...]
+
+    if X_np.ndim != 4:
+        raise ValueError(f"X must be 4D [N,T,Nmax,F] (or 3D), got {X_np.shape}")
+    if M_np.ndim != 3:
+        raise ValueError(f"M must be 3D [N,T,Nmax] (or 2D), got {M_np.shape}")
+
+    N = int(X_np.shape[0])
+    F = int(X_np.shape[-1])
+    if int(F) != int(ckpt_in_dim):
+        raise RuntimeError(f"Feature dim mismatch: npz F={F} but ckpt expects in_dim={ckpt_in_dim}")
+
+    csv_f = open_csv(out_csv, K)
+    assert csv_f is not None
+    try:
+        for i in range(N):
+            X = torch.from_numpy(np.asarray(X_np[i], dtype=np.float32)).unsqueeze(0).to(device)  # [1,T,N,F]
+            M = torch.from_numpy(np.asarray(M_np[i], dtype=np.bool_)).unsqueeze(0).to(device)    # [1,T,N]
+            p_t = safety_model.predict_proba(X, M)[0].detach().cpu().numpy()  # [K]
+            csv_f.write(str(i) + "," + ",".join([f"{float(v):.6f}" for v in p_t]) + "\n")
+    finally:
+        csv_f.close()
+
+    print("[infer] done.")
+    print(f"[infer] wrote csv: {out_csv}")
 
 
 @torch.no_grad()

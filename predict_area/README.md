@@ -176,6 +176,16 @@ python -m src.infer.cli \
   --fps 30
 ```
 
+- **.npz（特徴量 X/M）で推論（新）**
+  - 前処理で作った `.npz` の `X/M` をそのままモデルに入れて、サンプルごとの確率分布 \(p\) をCSVに出します
+
+```bash
+python -m src.infer.cli \
+  --npz /path/to/features.npz \
+  --ckpt /path/to/model.pt \
+  --out-csv /path/to/out.csv
+```
+
 #### 評価（教師分布と予測分布の比較）
 `src/eval.py` は、**教師データの確率分布 \(q\)** と **モデル予測の確率分布 \(p\)** を比較し、分布のズレを指標として出力します（分類の正解率だけでなく、**「どれだけ分布として近いか」**を見たいときに使います）。
 

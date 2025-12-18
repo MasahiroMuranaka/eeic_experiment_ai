@@ -148,14 +148,14 @@ def _read_pred_csv(pred_csv: str) -> Dict[int, np.ndarray]:
 
 
 def _read_gt_json(gt_json: str) -> Dict[str, np.ndarray]:
-    from .preprocess.external_json import load_prob_dist_json  # type: ignore[import-not-found]
+    from .preprocess.external_json import load_prob_dist_json
 
     return load_prob_dist_json(gt_json)
 
 
 def _index_to_frame_name(frames_dir: str) -> List[str]:
     # reuse the project's natural sort to match preprocessing
-    from .preprocess.frame_source import list_frame_paths  # type: ignore[import-not-found]
+    from .preprocess.frame_source import list_frame_paths
 
     paths = list_frame_paths(frames_dir)
     return [os.path.basename(p) for p in paths]
@@ -197,9 +197,9 @@ def eval_from_npz_with_model(
     x_max: float,
     eps: float,
 ) -> EvalSummary:
-    from .config import SafetyConfig, load_config  # type: ignore[import-not-found]
-    from .dataset import MultiNpzSafetyDataset  # type: ignore[import-not-found]
-    from .infer.model_io import load_safetynet  # type: ignore[import-not-found]
+    from .config import SafetyConfig, load_config
+    from .dataset import MultiNpzSafetyDataset
+    from .infer.model_io import load_safetynet
 
     import torch  # type: ignore[import-not-found]
     from torch.utils.data import DataLoader  # type: ignore[import-not-found]
@@ -299,7 +299,7 @@ def eval_from_npz_with_model(
 
 
 def _resolve_npz_paths(npz: str, npz_dir: str, manifest: str) -> List[str]:
-    from .dataset import list_npz_in_dir, read_manifest  # type: ignore[import-not-found]
+    from .dataset import list_npz_in_dir, read_manifest
 
     if npz:
         return [npz]

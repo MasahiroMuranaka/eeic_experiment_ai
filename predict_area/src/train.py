@@ -117,6 +117,12 @@ def main():
     ap.add_argument("--config", default="")
     ap.add_argument("--out-ckpt", default="safetynet.pt")
     ap.add_argument("--save-config", default="")
+    ap.add_argument(
+        "--temporal-model",
+        default="",
+        choices=["gru", "transformer"],
+        help="override cfg.temporal_model (if not set, uses config/default)",
+    )
 
     # loader knobs
     ap.add_argument("--num-workers", type=int, default=-1, help="default: macOS=0, otherwise=2")
@@ -146,6 +152,8 @@ def main():
     args = ap.parse_args()
 
     cfg = load_config(args.config) if args.config else SafetyConfig()
+    if args.temporal_model:
+        cfg.temporal_model = str(args.temporal_model)
     if args.save_config:
         save_config(args.save_config, cfg)
         print(f"[train] wrote config: {args.save_config}")
@@ -254,7 +262,7 @@ def main():
                     pdev = torch.device("cpu")
                 print(f"[train] debug devices: X={X.device} M={M.device} y={y.device} model={pdev}")
 
-            logits = model(X, M)
+            _, logits = model(X, M)
             loss = soft_ce_loss(logits, y)
 
             opt.zero_grad(set_to_none=True)
