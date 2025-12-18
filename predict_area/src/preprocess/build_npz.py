@@ -4,8 +4,8 @@ from typing import Dict, List, Optional, Tuple
 
 import numpy as np
 
-from ..config import SafetyConfig  # type: ignore[import-not-found]
-from .io_utils import cfg_get, ensure_dir
+from config import SafetyConfig  # type: ignore[import-not-found]
+from preprocess.io_utils import cfg_get, ensure_dir
 from .labels import compute_soft_label_from_future_xz
 
 

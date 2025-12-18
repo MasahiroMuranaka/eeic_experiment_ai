@@ -10,14 +10,14 @@ import cv2
 import numpy as np
 from ultralytics import YOLO  # type: ignore[import-not-found]
 
-from ..config import SafetyConfig  # type: ignore[import-not-found]
-from .io_utils import cfg_get, ensure_dir
-from .camera import camera_intrinsics_from_fov, pseudo3d_pose_from_keypoints
-from .ego import EgoMotionTracker
-from .yolo_pose import yolo_track_pose
-from .build_npz import build_npz_from_video_buffers
-from .camera import estimate_root_xyz_from_bbox  # fallback
-from .depth_anything_v2 import DepthAnythingV2DepthEstimator
+from config import SafetyConfig  # type: ignore[import-not-found]
+from preprocess.io_utils import cfg_get, ensure_dir
+from preprocess.camera import camera_intrinsics_from_fov, pseudo3d_pose_from_keypoints
+from preprocess.ego import EgoMotionTracker
+from preprocess.yolo_pose import yolo_track_pose
+from preprocess.build_npz import build_npz_from_video_buffers
+from preprocess.camera import estimate_root_xyz_from_bbox  # fallback
+from preprocess.depth_anything_v2 import DepthAnythingV2DepthEstimator
 from .frame_source import iter_frames_from_dir, read_first_frame
 from .external_json import load_detection_json, load_prob_dist_json, boxes_xyxy_from_detection_list
 

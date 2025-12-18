@@ -2,7 +2,7 @@ import os
 import glob
 from typing import List
 
-from ..config import SafetyConfig, load_config
+from config import SafetyConfig, load_config
 
 VIDEO_EXTS = (".mp4", ".mov", ".mkv", ".avi", ".webm", ".m4v")
 
