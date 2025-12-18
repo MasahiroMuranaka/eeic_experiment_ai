@@ -22,9 +22,15 @@ def create_dummy_npz(path, frames=30, num_area=8):
     print(f"Created dummy npz: {path}")
 
 if __name__ == "__main__":
-    video_path = "test_video.mp4"
-    model_npz = "test_model.npz"
-    answer_npz = "test_answer.npz"
+    import sys
+    from pathlib import Path
+    # Add parent directory to sys.path to import viz2
+    this_dir = Path(__file__).resolve().parent
+    sys.path.insert(0, str(this_dir.parent))
+
+    video_path = str(this_dir / "test_video.mp4")
+    model_npz = str(this_dir / "test_model.npz")
+    answer_npz = str(this_dir / "test_answer.npz")
     
     create_dummy_video(video_path)
     create_dummy_npz(model_npz)
