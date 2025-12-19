@@ -11,11 +11,11 @@ class SafetyConfig:
 
     # ===== Temporal =====
     T: int = 10  # past frames
-    H: int = 10  # future frames (for label)
+    H: int = 1  # future frames (for label)
 
     # ===== Person selection / padding =====
-    D: float = 3.0       # [m] 入力に含める人物の距離閾値
-    Nmax: int = 16       # 最大人数（超えたら近い順に切る）
+    D: float = 20.0       # [m] 入力に含める人物の距離閾値
+    Nmax: int = 30       # 最大人数（超えたら近い順に切る）
     fps: float = 30.0    # 動画fps（不明なら推定or指定）
 
     # ===== Camera model (疑似距離復元) =====
