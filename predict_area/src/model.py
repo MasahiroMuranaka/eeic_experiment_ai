@@ -4,45 +4,190 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 
-class PersonEncoder(nn.Module):
-    def __init__(self, in_dim: int, emb_dim: int = 128):
+def _masked_mean(x: torch.Tensor, m: torch.Tensor, dim: int, eps: float = 1e-6) -> torch.Tensor:
+    """
+    x: [..., N, D]
+    m: [..., N] bool
+    """
+    w = m.to(dtype=x.dtype).unsqueeze(-1)
+    num = (x * w).sum(dim=dim)
+    den = w.sum(dim=dim).clamp_min(eps)
+    return num / den
+
+
+def _masked_softmax(logits: torch.Tensor, m: torch.Tensor, dim: int, eps: float = 1e-6) -> torch.Tensor:
+    """
+    Safe softmax with mask. If a row has no valid entries, returns all-zeros for that row.
+
+    logits: [..., N]
+    m:     [..., N] bool (True=valid)
+    """
+    # set invalid to a large negative finite value to avoid infs
+    logits = logits.masked_fill(~m, -1e4)
+    attn = torch.softmax(logits, dim=dim)
+    # If all positions are masked, softmax becomes undefined (0/0). Fix by zeroing that row.
+    has_any = m.any(dim=dim, keepdim=True)
+    attn = torch.where(has_any, attn, torch.zeros_like(attn))
+    # Re-normalize to make sure it sums to 1 for valid rows (and stays 0 for empty rows).
+    attn = attn / (attn.sum(dim=dim, keepdim=True).clamp_min(eps))
+    return attn
+
+
+class ResidualMLPBlock(nn.Module):
+    def __init__(self, dim: int, hidden: int, dropout: float = 0.1):
         super().__init__()
-        self.net = nn.Sequential(
-            nn.Linear(in_dim, 256),
-            nn.GELU(),
-            nn.Linear(256, 256),
-            nn.GELU(),
-            nn.Linear(256, emb_dim),
+        self.norm = nn.LayerNorm(dim)
+        self.fc1 = nn.Linear(dim, hidden)
+        self.act = nn.GELU()
+        self.drop1 = nn.Dropout(dropout)
+        self.fc2 = nn.Linear(hidden, dim)
+        self.drop2 = nn.Dropout(dropout)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        y = self.norm(x)
+        y = self.fc1(y)
+        y = self.act(y)
+        y = self.drop1(y)
+        y = self.fc2(y)
+        y = self.drop2(y)
+        return x + y
+
+
+class PersonEncoder(nn.Module):
+    """
+    Per-person feature encoder.
+
+    IMPORTANT: input X contains zero padding for missing people; the mask M must be applied
+    after encoding to prevent linear biases from leaking signal from padded rows.
+    """
+
+    def __init__(self, in_dim: int, emb_dim: int = 128, dropout: float = 0.1):
+        super().__init__()
+        self.proj = nn.Linear(in_dim, emb_dim)
+        self.norm = nn.LayerNorm(emb_dim)
+        self.drop = nn.Dropout(dropout)
+        self.blocks = nn.Sequential(
+            ResidualMLPBlock(emb_dim, hidden=max(emb_dim * 4, 256), dropout=dropout),
+            ResidualMLPBlock(emb_dim, hidden=max(emb_dim * 4, 256), dropout=dropout),
         )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         # x: [B,T,N,F] -> [B,T,N,E]
-        return self.net(x)
+        y = self.proj(x)
+        y = self.norm(y)
+        y = F.gelu(y)
+        y = self.drop(y)
+        y = self.blocks(y)
+        return y
 
 
 class AttentionPool(nn.Module):
-    def __init__(self, emb_dim: int = 128):
+    """
+    Mask-safe attention pooling over the person dimension.
+
+    e: [B,T,N,E]
+    m: [B,T,N] bool
+    returns s: [B,T,E]
+    """
+
+    def __init__(self, emb_dim: int = 128, dropout: float = 0.1):
         super().__init__()
-        self.query = nn.Parameter(torch.randn(emb_dim))
-        self.key = nn.Linear(emb_dim, emb_dim)
-        self.val = nn.Linear(emb_dim, emb_dim)
+        self.query = nn.Parameter(torch.randn(emb_dim) * 0.02)
+        self.key = nn.Linear(emb_dim, emb_dim, bias=False)
+        self.val = nn.Linear(emb_dim, emb_dim, bias=False)
+        self.norm = nn.LayerNorm(emb_dim)
+        self.drop = nn.Dropout(dropout)
 
     def forward(self, e: torch.Tensor, m: torch.Tensor) -> torch.Tensor:
-        """
-        e: [B,T,N,E]
-        m: [B,T,N] bool
-        returns s: [B,T,E]
-        """
         B, T, N, E = e.shape
-        q = self.query.view(1, 1, 1, E)  # broadcast
-        k = self.key(e)
-        v = self.val(e)
+        # ensure bool mask
+        m = m.to(dtype=torch.bool)
+        # prevent padded rows from leaking via bias in the encoder (or any upstream ops)
+        e = e * m.unsqueeze(-1).to(dtype=e.dtype)
 
+        x = self.norm(e)
+        k = self.key(x)
+        v = self.val(x)
+
+        q = self.query.view(1, 1, 1, E)  # broadcast
         attn_logits = (q * k).sum(dim=-1)  # [B,T,N]
-        attn_logits = attn_logits.masked_fill(~m, -1e9)
-        attn = F.softmax(attn_logits, dim=-1)  # [B,T,N]
+        attn = _masked_softmax(attn_logits, m, dim=-1)  # [B,T,N]
         s = (attn.unsqueeze(-1) * v).sum(dim=-2)  # [B,T,E]
+        s = self.drop(s)
         return s
+
+
+class SetAttentionBlock(nn.Module):
+    """
+    Set transformer block over the person dimension, applied independently per time step.
+    """
+
+    def __init__(self, dim: int, nhead: int = 4, ff: int = 512, dropout: float = 0.1):
+        super().__init__()
+        self.norm1 = nn.LayerNorm(dim)
+        self.attn = nn.MultiheadAttention(dim, nhead, dropout=dropout, batch_first=True)
+        self.drop1 = nn.Dropout(dropout)
+        self.norm2 = nn.LayerNorm(dim)
+        self.ff = nn.Sequential(
+            nn.Linear(dim, ff),
+            nn.GELU(),
+            nn.Dropout(dropout),
+            nn.Linear(ff, dim),
+            nn.Dropout(dropout),
+        )
+
+    def forward(self, x: torch.Tensor, key_padding_mask: torch.Tensor) -> torch.Tensor:
+        # x: [BT,N,E], key_padding_mask: [BT,N] True=pad
+        # Important edge-case: if a whole row is padded (no valid people), MultiheadAttention would produce NaNs.
+        valid = ~key_padding_mask
+        has_any = valid.any(dim=1)  # [BT]
+        if not bool(has_any.any()):
+            return x
+
+        out = x
+        idx = has_any.nonzero(as_tuple=False).squeeze(1)
+        x_sel = x.index_select(0, idx)
+        kpm_sel = key_padding_mask.index_select(0, idx)
+
+        y = self.norm1(x_sel)
+        y, _ = self.attn(y, y, y, key_padding_mask=kpm_sel, need_weights=False)
+        x_sel = x_sel + self.drop1(y)
+        x_sel = x_sel + self.ff(self.norm2(x_sel))
+
+        out = out.clone()
+        out.index_copy_(0, idx, x_sel)
+        return out
+
+
+class TemporalAttentionPool(nn.Module):
+    """
+    Attention pooling over the time dimension.
+
+    out: [B,T,D]
+    returns h: [B,D]
+    """
+
+    def __init__(self, dim: int, dropout: float = 0.1):
+        super().__init__()
+        self.query = nn.Parameter(torch.randn(dim) * 0.02)
+        self.key = nn.Linear(dim, dim, bias=False)
+        self.val = nn.Linear(dim, dim, bias=False)
+        self.norm = nn.LayerNorm(dim)
+        self.drop = nn.Dropout(dropout)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        B, T, D = x.shape
+        z = self.norm(x)
+        k = self.key(z)
+        v = self.val(z)
+        q = self.query.view(1, 1, D)
+        logits = (q * k).sum(dim=-1)  # [B,T]
+        # time steps are always valid in this project, but keep it safe anyway
+        m = torch.ones((B, T), dtype=torch.bool, device=x.device)
+        attn = _masked_softmax(logits, m, dim=-1)  # [B,T]
+        h = (attn.unsqueeze(-1) * v).sum(dim=-2)  # [B,D]
+        h = self.drop(h)
+        return h
 
 
 class SinusoidalPositionalEncoding(nn.Module):
@@ -89,6 +234,7 @@ class TemporalEncoder(nn.Module):
             raise ValueError(f"temporal must be 'gru' or 'transformer', got {temporal}")
         self.temporal = temporal
 
+        self.dropout = float(tf_dropout)
         if temporal == "gru":
             self.encoder = nn.GRU(
                 input_size=emb_dim,
@@ -119,17 +265,15 @@ class TemporalEncoder(nn.Module):
     def forward(self, s: torch.Tensor) -> torch.Tensor:
         """
         s: [B,T,E]
-        returns h: [B,out_dim] (last token)
+        returns out: [B,T,out_dim]
         """
         if self.temporal == "gru":
             out, _ = self.encoder(s)     # [B,T,H]
-            h = out[:, -1, :]
-            return h
+            return out
         else:
             x = self.posenc(s)           # [B,T,E]
             out = self.encoder(x)        # [B,T,E]
-            h = out[:, -1, :]
-            return h
+            return out
 
 
 class SafetyNet(nn.Module):
@@ -148,6 +292,10 @@ class SafetyNet(nn.Module):
         tf_ff: int = 512,
         tf_dropout: float = 0.1,
         tf_norm_first: bool = True,
+        # Stronger modeling knobs (optional; keep defaults for backward compatibility)
+        set_layers: int = 2,
+        set_nhead: int = 4,
+        set_ff: int = 512,
     ):
         super().__init__()
         self.in_dim = int(in_dim)
@@ -155,8 +303,23 @@ class SafetyNet(nn.Module):
         self.emb_dim = int(emb_dim)
         self.temporal_name = temporal.lower().strip()
 
-        self.person = PersonEncoder(in_dim, emb_dim)
-        self.pool = AttentionPool(emb_dim)
+        self.person = PersonEncoder(in_dim, emb_dim, dropout=float(tf_dropout))
+
+        # person-set modeling per frame (BT,N,E)
+        self.set_layers = int(set_layers)
+        self.set_blocks = nn.ModuleList(
+            [
+                SetAttentionBlock(
+                    dim=emb_dim,
+                    nhead=int(set_nhead),
+                    ff=int(set_ff),
+                    dropout=float(tf_dropout),
+                )
+                for _ in range(int(set_layers))
+            ]
+        )
+
+        self.pool = AttentionPool(emb_dim, dropout=float(tf_dropout))
         self.temporal = TemporalEncoder(
             temporal=self.temporal_name,
             emb_dim=emb_dim,
@@ -168,6 +331,7 @@ class SafetyNet(nn.Module):
             tf_dropout=tf_dropout,
             tf_norm_first=tf_norm_first,
         )
+        self.time_pool = TemporalAttentionPool(self.temporal.out_dim, dropout=float(tf_dropout))
         self.head = nn.Sequential(
             nn.Linear(self.temporal.out_dim, 256),
             nn.LayerNorm(256),
@@ -182,10 +346,28 @@ class SafetyNet(nn.Module):
         M: [B,T,N]
         returns p: [B,K], logits: [B,K]
         """
-        e = self.person(X)      # [B,T,N,E]
-        s = self.pool(e, M)     # [B,T,E]
-        h = self.temporal(s)    # [B,D]
-        logits = self.head(h)   # [B,K]
+        # ensure correct dtypes
+        M = M.to(dtype=torch.bool)
+
+        e = self.person(X)                              # [B,T,N,E]
+        e = e * M.unsqueeze(-1).to(dtype=e.dtype)       # IMPORTANT: kill padded rows
+
+        # Set-attention over persons (per time step)
+        if self.set_layers > 0:
+            B, T, N, E = e.shape
+            bt = B * T
+            x = e.reshape(bt, N, E)
+            pad = (~M).reshape(bt, N)                   # True=pad
+            for blk in self.set_blocks:
+                x = blk(x, key_padding_mask=pad)
+                # keep padded rows zeroed (safety)
+                x = x * (~pad).unsqueeze(-1).to(dtype=x.dtype)
+            e = x.reshape(B, T, N, E)
+
+        s = self.pool(e, M)                             # [B,T,E]
+        out = self.temporal(s)                          # [B,T,D]
+        h = self.time_pool(out)                         # [B,D]
+        logits = self.head(h)                           # [B,K]
         p = torch.softmax(logits, dim=-1)
         return p, logits
 

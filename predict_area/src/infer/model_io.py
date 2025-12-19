@@ -29,6 +29,16 @@ def load_safetynet(ckpt_path: str, cfg: SafetyConfig) -> Tuple[SafetyNet, int, i
 
     model_kwargs = ckpt.get("model_kwargs") or _model_kwargs_from_cfg(cfg)
     model = SafetyNet(in_dim=in_dim, K=K, **model_kwargs).to(device)
-    model.load_state_dict(ckpt["model_state"])
+    try:
+        model.load_state_dict(ckpt["model_state"], strict=True)
+    except RuntimeError as e:
+        # Keep user experience smooth: allow loading older checkpoints even if the model definition evolved.
+        # Note: if keys are missing, those new parameters will stay randomly initialized.
+        print(f"[infer] warning: strict load_state_dict failed: {e}")
+        missing, unexpected = model.load_state_dict(ckpt["model_state"], strict=False)
+        if missing:
+            print(f"[infer] warning: missing keys (initialized randomly): {len(missing)}")
+        if unexpected:
+            print(f"[infer] warning: unexpected keys (ignored): {len(unexpected)}")
     model.eval()
     return model, in_dim, K, device
