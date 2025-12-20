@@ -2,7 +2,7 @@ import torch  # type: ignore[import-not-found]
 from typing import Any, Dict, Tuple
 
 from ..config import SafetyConfig  # type: ignore[import-not-found]
-from ..model import SafetyNet  # type: ignore[import-not-found]
+from ..model import SafetyNet, SafetyNet2  # type: ignore[import-not-found]
 
 
 def _model_kwargs_from_cfg(cfg: SafetyConfig) -> Dict[str, Any]:
@@ -32,3 +32,18 @@ def load_safetynet(ckpt_path: str, cfg: SafetyConfig) -> Tuple[SafetyNet, int, i
     model.load_state_dict(ckpt["model_state"])
     model.eval()
     return model, in_dim, K, device
+
+def load_safetynet2(ckpt_path: str, cfg: SafetyConfig) -> Tuple[SafetyNet, int, int, torch.device]:
+    ckpt = torch.load(ckpt_path, map_location="cpu")
+    in_dim = int(ckpt["in_dim"])
+    K = int(ckpt["K"])
+
+    device_str = str(getattr(cfg, "device", "cpu"))
+    device = torch.device(device_str if torch.cuda.is_available() else "cpu")
+
+    model_kwargs = ckpt.get("model_kwargs") or _model_kwargs_from_cfg(cfg)
+    model = SafetyNet2(in_dim=in_dim, K=K, **model_kwargs).to(device)
+    model.load_state_dict(ckpt["model_state"])
+    model.eval()
+    return model, in_dim, K, device
+

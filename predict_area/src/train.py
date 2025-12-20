@@ -1,3 +1,4 @@
+
 import argparse
 import os
 import platform
@@ -8,6 +9,7 @@ from typing import Iterable, List
 import numpy as np
 import torch  # type: ignore[import-not-found]
 from torch.utils.data import DataLoader  # type: ignore[import-not-found]
+import torch.nn as nn
 
 from .config import SafetyConfig, load_config, save_config  # type: ignore[import-not-found]
 from .dataset import (  # type: ignore[import-not-found]
@@ -16,7 +18,7 @@ from .dataset import (  # type: ignore[import-not-found]
     list_npz_in_dir,
     read_manifest,
 )
-from .model import SafetyNet  # type: ignore[import-not-found]
+from .model import SafetyNet, SafetyNet2  # type: ignore[import-not-found]
 
 
 def set_seed(seed: int):
@@ -29,8 +31,18 @@ def set_seed(seed: int):
 
 def soft_ce_loss(logits: torch.Tensor, q: torch.Tensor) -> torch.Tensor:
     # q: [B,K], logits: [B,K]
-    logp = torch.log_softmax(logits, dim=-1)
-    return -(q * logp).sum(dim=-1).mean()
+    p = torch.softmax(logits, dim=-1)
+    p = p.clamp(min=1e-8)
+    q = q.clamp(min=1e-8)
+    m = (p + q) * 0.5
+
+    logm = torch.log(m)
+    logp = torch.log(p)
+    logq = torch.log(q)
+    
+    loss = 0.5 * (q * (logq - logm)).sum(dim=-1) + 0.5 * (p * (logp - logm)).sum(dim=-1)
+    return loss.mean()
+    # return -(q * logp).sum(dim=-1).mean()
 
 
 def _unique_keep_order(xs: Iterable[str]) -> List[str]:
@@ -149,6 +161,8 @@ def main():
         action="store_true",
         help="synchronize CUDA for more accurate timing logs (slower; useful for debugging GPU usage)",
     )
+    ap.add_argument("--input-ckpt", default=None)
+
     args = ap.parse_args()
 
     cfg = load_config(args.config) if args.config else SafetyConfig()
@@ -230,9 +244,23 @@ def main():
         "tf_dropout": float(getattr(cfg, "tf_dropout", 0.1)),
         "tf_norm_first": bool(getattr(cfg, "tf_norm_first", True)),
     }
-    model = SafetyNet(in_dim=in_dim, K=K, **model_kwargs).to(device)
 
-    opt = torch.optim.AdamW(model.parameters(), lr=cfg.lr, weight_decay=cfg.weight_decay)
+    if args.input_ckpt is None:
+        model = SafetyNet(in_dim=in_dim, K=K, **model_kwargs).to(device)
+        opt = torch.optim.AdamW(model.parameters(), lr=cfg.lr, weight_decay=cfg.weight_decay)
+    else:
+        state_dict = torch.load(args.input_ckpt)
+        model = SafetyNet2(in_dim=in_dim, K=K, **model_kwargs).to(device)
+        model.load_state_dict(state_dict, strict=False)
+        opt = torch.optim.AdamW([
+            {'params': model.temporal.encoder.layers[-2:].parameters(), 'lr': 1e-5},
+            {'params': model.head.parameters(), 'lr': 1e-4, 'weight_decay': cfg.weight_decay},
+            {'params': model.residual_layer.parameters(), 'lr': 1e-3, 'weight_decay': 0}
+        ])
+        for m in model.residual_layer:
+            if isinstance(m, nn.Linear):
+                nn.init.zeros_(m.weight)
+                nn.init.zeros_(m.bias)
 
     # training loop
     for epoch in range(1, cfg.epochs + 1):

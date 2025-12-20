@@ -199,13 +199,14 @@ def eval_from_npz_with_model(
 ) -> EvalSummary:
     from .config import SafetyConfig, load_config
     from .dataset import MultiNpzSafetyDataset
-    from .infer.model_io import load_safetynet
+    from .infer.model_io import load_safetynet, load_safetynet2
 
     import torch  # type: ignore[import-not-found]
     from torch.utils.data import DataLoader  # type: ignore[import-not-found]
 
     cfg = load_config(config_path) if config_path else SafetyConfig()
-    model, in_dim, K, device = load_safetynet(ckpt, cfg)
+    # model, in_dim, K, device = load_safetynet(ckpt, cfg)
+    model, in_dim, K, device = load_safetynet2(ckpt, cfg)
 
     ds = MultiNpzSafetyDataset(npz_paths)
     assert ds.K is not None

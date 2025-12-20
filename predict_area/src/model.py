@@ -188,7 +188,7 @@ class SafetyNet(nn.Module):
         logits = self.head(h)   # [B,K]
         p = torch.softmax(logits, dim=-1)
         return p, logits
-
+    
     @torch.no_grad()
     def predict_proba(self, X: torch.Tensor, M: torch.Tensor) -> torch.Tensor:
         """
@@ -204,3 +204,46 @@ class SafetyNet(nn.Module):
         self.eval()
         p, _ = self.forward(X, M)
         return p
+
+class SafetyNet2(SafetyNet):
+    def __init__(
+        self, 
+        in_dim, 
+        K, 
+        emb_dim = 128, 
+        temporal = "gru", 
+        rnn_hidden = 256, 
+        rnn_layers = 2, 
+        tf_layers = 2, 
+        tf_nhead = 4, 
+        tf_ff = 512, 
+        tf_dropout = 0.1, 
+        tf_norm_first = True
+        ):
+        super().__init__(
+            in_dim, 
+            K, 
+            emb_dim, 
+            temporal, 
+            rnn_hidden, 
+            rnn_layers, 
+            tf_layers, 
+            tf_nhead, 
+            tf_ff, 
+            tf_dropout, 
+            tf_norm_first
+        )
+        self.residual_layer = nn.Sequential(
+            nn.Linear(K, K//2),
+            nn.GELU(),
+            nn.Linear(K//2, K)
+        )
+        
+    def forward(self, X: torch.Tensor, M: torch.Tensor):
+        e = self.person(X)      # [B,T,N,E]
+        s = self.pool(e, M)     # [B,T,E]
+        h = self.temporal(s)    # [B,D]
+        h = self.head(h)   # [B,K]
+        logits = h + self.residual_layer(h)
+        p = torch.softmax(logits, dim=-1)
+        return p, logits
