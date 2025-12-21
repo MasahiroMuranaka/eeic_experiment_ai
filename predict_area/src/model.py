@@ -274,7 +274,14 @@ class SpatioTemporalTransformer(nn.Module):
         x = self.pre_drop(x)
         out = self.encoder(x, src_key_padding_mask=tok_pad)  # [B,1+S,E]
         out = self.post_norm(out)
-        return out[:, 0, :]
+        # Stronger, still parameter-free: fuse CLS with masked mean of valid (t,n) tokens.
+        # - Improves robustness when CLS alone is not enough
+        # - Keeps output dim E (backward compatible at interface level)
+        cls = out[:, 0, :]                 # [B,E]
+        tok = out[:, 1:, :]                # [B,S,E]
+        valid = (~tok_pad[:, 1:]).to(dtype=torch.bool)  # [B,S] True=valid
+        mean_tok = _masked_mean(tok, valid, dim=1)       # [B,E] (0 if none valid)
+        return cls + mean_tok
 
 
 class SinusoidalPositionalEncoding(nn.Module):
@@ -358,6 +365,7 @@ class TemporalEncoder(nn.Module):
             out, _ = self.encoder(s)     # [B,T,H]
             return out
         else:
+            assert self.posenc is not None
             x = self.posenc(s)           # [B,T,E]
             out = self.encoder(x)        # [B,T,E]
             return out
@@ -493,7 +501,7 @@ class SafetyNet(nn.Module):
         logits = self.head(h)                           # [B,K]
         p = torch.softmax(logits, dim=-1)
         return p, logits
-    
+
     @torch.no_grad()
     def predict_proba(self, X: torch.Tensor, M: torch.Tensor) -> torch.Tensor:
         """
@@ -510,45 +518,45 @@ class SafetyNet(nn.Module):
         p, _ = self.forward(X, M)
         return p
 
+
 class SafetyNet2(SafetyNet):
     def __init__(
-        self, 
-        in_dim, 
-        K, 
-        emb_dim = 128, 
-        temporal = "gru", 
-        rnn_hidden = 256, 
-        rnn_layers = 2, 
-        tf_layers = 2, 
-        tf_nhead = 4, 
-        tf_ff = 512, 
-        tf_dropout = 0.1, 
-        tf_norm_first = True
-        ):
+        self,
+        in_dim: int,
+        K: int,
+        emb_dim: int = 128,
+        temporal: str = "gru",
+        rnn_hidden: int = 256,
+        rnn_layers: int = 2,
+        tf_layers: int = 2,
+        tf_nhead: int = 4,
+        tf_ff: int = 512,
+        tf_dropout: float = 0.1,
+        tf_norm_first: bool = True,
+    ):
         super().__init__(
-            in_dim, 
-            K, 
-            emb_dim, 
-            temporal, 
-            rnn_hidden, 
-            rnn_layers, 
-            tf_layers, 
-            tf_nhead, 
-            tf_ff, 
-            tf_dropout, 
-            tf_norm_first
+            in_dim,
+            K,
+            emb_dim,
+            temporal,
+            rnn_hidden,
+            rnn_layers,
+            tf_layers,
+            tf_nhead,
+            tf_ff,
+            tf_dropout,
+            tf_norm_first,
         )
         self.residual_layer = nn.Sequential(
-            nn.Linear(K, K//2),
+            nn.Linear(K, K // 2),
             nn.GELU(),
-            nn.Linear(K//2, K)
+            nn.Linear(K // 2, K),
         )
-        
+
     def forward(self, X: torch.Tensor, M: torch.Tensor):
-        e = self.person(X)      # [B,T,N,E]
-        s = self.pool(e, M)     # [B,T,E]
-        h = self.temporal(s)    # [B,D]
-        h = self.head(h)   # [B,K]
-        logits = h + self.residual_layer(h)
+        # Keep SafetyNet2 fully consistent with SafetyNet's masking + mode handling,
+        # then apply a small residual calibration on logits.
+        _, logits = super().forward(X, M)                 # [B,K]
+        logits = logits + self.residual_layer(logits)     # [B,K]
         p = torch.softmax(logits, dim=-1)
         return p, logits
