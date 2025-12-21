@@ -60,16 +60,19 @@ class SafetyConfig:
     # ===== Model (SafetyNet) =====
     # temporal encoder: "gru" or "transformer"
     temporal_model: str = "gru"
-    emb_dim: int = 128
+    # 強めデフォルト（Transformer時の表現力を上げる）
+    # ※emb_dim は tf_nhead で割り切れる必要があります
+    emb_dim: int = 256
 
     # --- GRU params ---
     rnn_hidden: int = 256
     rnn_layers: int = 2
 
     # --- Transformer params ---
-    tf_layers: int = 2
-    tf_nhead: int = 4
-    tf_ff: int = 512
+    # transformer モードでは、Spatio-Temporal Transformer の層数等として使われます
+    tf_layers: int = 6
+    tf_nhead: int = 8
+    tf_ff: int = 1024
     tf_dropout: float = 0.1
     tf_norm_first: bool = True
 

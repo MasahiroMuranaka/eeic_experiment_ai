@@ -190,6 +190,93 @@ class TemporalAttentionPool(nn.Module):
         return h
 
 
+class SpatioTemporalTransformer(nn.Module):
+    """
+    Strong option: flatten (time, person) tokens -> TransformerEncoder with key_padding_mask from M.
+
+    - CLS token is always present (unmasked), preventing NaNs when all person tokens are masked.
+    - 2D learned positional embeddings: time + person-index.
+
+    Inputs:
+      e: [B,T,N,E]
+      M: [B,T,N] bool (True=valid)
+    Output:
+      h: [B,E] (CLS)
+    """
+
+    def __init__(
+        self,
+        emb_dim: int,
+        *,
+        tf_layers: int,
+        tf_nhead: int,
+        tf_ff: int,
+        tf_dropout: float,
+        tf_norm_first: bool,
+        max_T: int = 2048,
+        max_N: int = 512,
+    ):
+        super().__init__()
+        emb_dim = int(emb_dim)
+        tf_nhead = int(tf_nhead)
+        if emb_dim % tf_nhead != 0:
+            raise ValueError(f"emb_dim ({emb_dim}) must be divisible by tf_nhead ({tf_nhead})")
+
+        self.emb_dim = emb_dim
+        self.max_T = int(max_T)
+        self.max_N = int(max_N)
+
+        self.cls = nn.Parameter(torch.randn(emb_dim) * 0.02)
+        self.time_emb = nn.Embedding(self.max_T, emb_dim)
+        self.person_emb = nn.Embedding(self.max_N, emb_dim)
+        self.pre_norm = nn.LayerNorm(emb_dim)
+        self.pre_drop = nn.Dropout(float(tf_dropout))
+
+        layer = nn.TransformerEncoderLayer(
+            d_model=emb_dim,
+            nhead=tf_nhead,
+            dim_feedforward=int(tf_ff),
+            dropout=float(tf_dropout),
+            batch_first=True,
+            activation="gelu",
+            norm_first=bool(tf_norm_first),
+        )
+        self.encoder = nn.TransformerEncoder(layer, num_layers=int(tf_layers))
+        self.post_norm = nn.LayerNorm(emb_dim)
+
+    def forward(self, e: torch.Tensor, M: torch.Tensor) -> torch.Tensor:
+        B, T, N, E = e.shape
+        if E != self.emb_dim:
+            raise ValueError(f"emb_dim mismatch: got E={E}, expected {self.emb_dim}")
+        if T > self.max_T:
+            raise ValueError(f"T={T} exceeds max_T={self.max_T}")
+        if N > self.max_N:
+            raise ValueError(f"N={N} exceeds max_N={self.max_N}")
+
+        M = M.to(dtype=torch.bool)
+
+        x = e.reshape(B, T * N, E)              # [B,S,E]
+        tok_pad = (~M).reshape(B, T * N)        # [B,S] True=pad
+
+        t_idx = torch.arange(T, device=e.device).repeat_interleave(N)  # [S]
+        n_idx = torch.arange(N, device=e.device).repeat(T)             # [S]
+        pos = self.time_emb(t_idx) + self.person_emb(n_idx)            # [S,E]
+        x = x + pos.unsqueeze(0).to(dtype=x.dtype)
+
+        cls = self.cls.view(1, 1, E).expand(B, 1, E).to(dtype=x.dtype)
+        x = torch.cat([cls, x], dim=1)  # [B,1+S,E]
+        tok_pad = torch.cat(
+            [torch.zeros((B, 1), dtype=torch.bool, device=e.device), tok_pad],
+            dim=1,
+        )  # [B,1+S]
+
+        x = self.pre_norm(x)
+        x = self.pre_drop(x)
+        out = self.encoder(x, src_key_padding_mask=tok_pad)  # [B,1+S,E]
+        out = self.post_norm(out)
+        return out[:, 0, :]
+
+
 class SinusoidalPositionalEncoding(nn.Module):
     """
     Standard sinusoidal PE for Transformer.
@@ -296,6 +383,9 @@ class SafetyNet(nn.Module):
         set_layers: int = 2,
         set_nhead: int = 4,
         set_ff: int = 512,
+        # Spatio-temporal embedding caps (only used for temporal="transformer")
+        st_max_T: int = 2048,
+        st_max_N: int = 512,
     ):
         super().__init__()
         self.in_dim = int(in_dim)
@@ -305,35 +395,62 @@ class SafetyNet(nn.Module):
 
         self.person = PersonEncoder(in_dim, emb_dim, dropout=float(tf_dropout))
 
-        # person-set modeling per frame (BT,N,E)
-        self.set_layers = int(set_layers)
-        self.set_blocks = nn.ModuleList(
-            [
-                SetAttentionBlock(
-                    dim=emb_dim,
-                    nhead=int(set_nhead),
-                    ff=int(set_ff),
-                    dropout=float(tf_dropout),
-                )
-                for _ in range(int(set_layers))
-            ]
-        )
+        # modes:
+        # - transformer: strongest (spatio-temporal transformer over (t,n) tokens)
+        # - gru: baseline
+        if self.temporal_name == "transformer":
+            self.mode = "st_transformer"
+            self.st = SpatioTemporalTransformer(
+                emb_dim=emb_dim,
+                tf_layers=tf_layers,
+                tf_nhead=tf_nhead,
+                tf_ff=tf_ff,
+                tf_dropout=tf_dropout,
+                tf_norm_first=tf_norm_first,
+                max_T=int(st_max_T),
+                max_N=int(st_max_N),
+            )
+            self.out_dim = int(emb_dim)
 
-        self.pool = AttentionPool(emb_dim, dropout=float(tf_dropout))
-        self.temporal = TemporalEncoder(
-            temporal=self.temporal_name,
-            emb_dim=emb_dim,
-            rnn_hidden=rnn_hidden,
-            rnn_layers=rnn_layers,
-            tf_layers=tf_layers,
-            tf_nhead=tf_nhead,
-            tf_ff=tf_ff,
-            tf_dropout=tf_dropout,
-            tf_norm_first=tf_norm_first,
-        )
-        self.time_pool = TemporalAttentionPool(self.temporal.out_dim, dropout=float(tf_dropout))
+            # keep attributes for compatibility; not used in this mode
+            self.set_layers = 0
+            self.set_blocks = nn.ModuleList([])
+            self.pool = None
+            self.temporal = None
+            self.time_pool = None
+        else:
+            self.mode = "gru"
+            # person-set modeling per frame (BT,N,E)
+            self.set_layers = int(set_layers)
+            self.set_blocks = nn.ModuleList(
+                [
+                    SetAttentionBlock(
+                        dim=emb_dim,
+                        nhead=int(set_nhead),
+                        ff=int(set_ff),
+                        dropout=float(tf_dropout),
+                    )
+                    for _ in range(int(set_layers))
+                ]
+            )
+
+            self.pool = AttentionPool(emb_dim, dropout=float(tf_dropout))
+            self.temporal = TemporalEncoder(
+                temporal=self.temporal_name,
+                emb_dim=emb_dim,
+                rnn_hidden=rnn_hidden,
+                rnn_layers=rnn_layers,
+                tf_layers=tf_layers,
+                tf_nhead=tf_nhead,
+                tf_ff=tf_ff,
+                tf_dropout=tf_dropout,
+                tf_norm_first=tf_norm_first,
+            )
+            self.out_dim = int(self.temporal.out_dim)
+            self.time_pool = TemporalAttentionPool(self.out_dim, dropout=float(tf_dropout))
+
         self.head = nn.Sequential(
-            nn.Linear(self.temporal.out_dim, 256),
+            nn.Linear(self.out_dim, 256),
             nn.LayerNorm(256),
             nn.GELU(),
             nn.Dropout(0.1),
@@ -352,21 +469,27 @@ class SafetyNet(nn.Module):
         e = self.person(X)                              # [B,T,N,E]
         e = e * M.unsqueeze(-1).to(dtype=e.dtype)       # IMPORTANT: kill padded rows
 
-        # Set-attention over persons (per time step)
-        if self.set_layers > 0:
-            B, T, N, E = e.shape
-            bt = B * T
-            x = e.reshape(bt, N, E)
-            pad = (~M).reshape(bt, N)                   # True=pad
-            for blk in self.set_blocks:
-                x = blk(x, key_padding_mask=pad)
-                # keep padded rows zeroed (safety)
-                x = x * (~pad).unsqueeze(-1).to(dtype=x.dtype)
-            e = x.reshape(B, T, N, E)
+        if self.mode == "st_transformer":
+            h = self.st(e, M)                           # [B,E]
+        else:
+            # Set-attention over persons (per time step)
+            if self.set_layers > 0:
+                B, T, N, E = e.shape
+                bt = B * T
+                x = e.reshape(bt, N, E)
+                pad = (~M).reshape(bt, N)               # True=pad
+                for blk in self.set_blocks:
+                    x = blk(x, key_padding_mask=pad)
+                    # keep padded rows zeroed (safety)
+                    x = x * (~pad).unsqueeze(-1).to(dtype=x.dtype)
+                e = x.reshape(B, T, N, E)
 
-        s = self.pool(e, M)                             # [B,T,E]
-        out = self.temporal(s)                          # [B,T,D]
-        h = self.time_pool(out)                         # [B,D]
+            assert self.pool is not None
+            assert self.temporal is not None
+            assert self.time_pool is not None
+            s = self.pool(e, M)                         # [B,T,E]
+            out = self.temporal(s)                      # [B,T,D]
+            h = self.time_pool(out)                     # [B,D]
         logits = self.head(h)                           # [B,K]
         p = torch.softmax(logits, dim=-1)
         return p, logits
