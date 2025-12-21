@@ -9,7 +9,7 @@ from typing import Iterable, List
 import numpy as np
 import torch  # type: ignore[import-not-found]
 from torch.utils.data import DataLoader  # type: ignore[import-not-found]
-import torch.nn as nn
+import torch.nn as nn  # type: ignore[import-not-found]
 
 from .config import SafetyConfig, load_config, save_config  # type: ignore[import-not-found]
 from .dataset import (  # type: ignore[import-not-found]
@@ -39,7 +39,7 @@ def soft_ce_loss(logits: torch.Tensor, q: torch.Tensor) -> torch.Tensor:
     logm = torch.log(m)
     logp = torch.log(p)
     logq = torch.log(q)
-    
+
     loss = 0.5 * (q * (logq - logm)).sum(dim=-1) + 0.5 * (p * (logp - logm)).sum(dim=-1)
     return loss.mean()
     # return -(q * logp).sum(dim=-1).mean()
@@ -58,6 +58,21 @@ def _unique_keep_order(xs: Iterable[str]) -> List[str]:
 
 def _norm_path(p: str) -> str:
     return os.path.abspath(os.path.expanduser(p))
+
+
+def _load_state_dict_from_input_ckpt(path: str) -> dict:
+    """
+    Accept either:
+      - a plain PyTorch state_dict (mapping param_name -> tensor), OR
+      - a training checkpoint dict saved by this repo (with key "model_state").
+    """
+    obj = torch.load(path, map_location="cpu")
+    if isinstance(obj, dict) and "model_state" in obj and isinstance(obj["model_state"], dict):
+        return obj["model_state"]
+    if isinstance(obj, dict):
+        # assume it's already a state_dict
+        return obj
+    raise SystemExit(f"--input-ckpt must be a state_dict or a dict with 'model_state': {path}")
 
 
 def _expand_npz_inputs(inputs: List[str]) -> List[str]:
@@ -161,7 +176,14 @@ def main():
         action="store_true",
         help="synchronize CUDA for more accurate timing logs (slower; useful for debugging GPU usage)",
     )
-    ap.add_argument("--input-ckpt", default=None)
+    ap.add_argument(
+        "--input-ckpt",
+        default=None,
+        help=(
+            "追加学習用の初期重み。"
+            "state_dict（param名->tensor）または、このtrain.pyが保存した ckpt（'model_state' を含むdict）のパス。"
+        ),
+    )
 
     args = ap.parse_args()
 
@@ -249,18 +271,32 @@ def main():
         model = SafetyNet(in_dim=in_dim, K=K, **model_kwargs).to(device)
         opt = torch.optim.AdamW(model.parameters(), lr=cfg.lr, weight_decay=cfg.weight_decay)
     else:
-        state_dict = torch.load(args.input_ckpt)
+        state_dict = _load_state_dict_from_input_ckpt(args.input_ckpt)
         model = SafetyNet2(in_dim=in_dim, K=K, **model_kwargs).to(device)
-        model.load_state_dict(state_dict, strict=False)
-        opt = torch.optim.AdamW([
-            {'params': model.temporal.encoder.layers[-2:].parameters(), 'lr': 1e-5},
-            {'params': model.head.parameters(), 'lr': 1e-4, 'weight_decay': cfg.weight_decay},
-            {'params': model.residual_layer.parameters(), 'lr': 1e-3, 'weight_decay': 0}
-        ])
+        # residual calibration should start from "do nothing" if the ckpt doesn't have it.
+        # (If the ckpt *does* include residual_layer params, load_state_dict will overwrite them.)
         for m in model.residual_layer:
             if isinstance(m, nn.Linear):
                 nn.init.zeros_(m.weight)
                 nn.init.zeros_(m.bias)
+
+        missing, unexpected = model.load_state_dict(state_dict, strict=False)
+        if missing:
+            print("[train] input-ckpt: missing keys (ignored):")
+            for k in missing[:50]:
+                print(f"  - {k}")
+            if len(missing) > 50:
+                print("  ...")
+        if unexpected:
+            print("[train] input-ckpt: unexpected keys (ignored):")
+            for k in unexpected[:50]:
+                print(f"  - {k}")
+            if len(unexpected) > 50:
+                print("  ...")
+
+        # Keep optimizer robust across temporal modes ("gru" vs "transformer"/st_transformer).
+        # If you want fine-tuning with per-module LRs, add a dedicated flag later.
+        opt = torch.optim.AdamW(model.parameters(), lr=cfg.lr, weight_decay=cfg.weight_decay)
 
     # training loop
     for epoch in range(1, cfg.epochs + 1):
