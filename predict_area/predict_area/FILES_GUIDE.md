@@ -1,0 +1,320 @@
+### このドキュメントについて
+`predict_area/` 配下の各ファイル（主に `src/`）について、**役割**・**主要な関数/クラス**・**引数/入出力（特にテンソル形状）**を短くまとめたガイドです。
+
+本プロジェクトは大きく以下の流れで動きます。
+
+- **前処理**: 動画 → YOLO Pose 追跡 +（任意で）DepthAnythingV2 → 特徴量 `X` とマスク `M` と教師 `y` を `.npz` に保存
+- **学習**: `.npz`（複数可）→ `SafetyNet` を学習 → checkpoint (`.pt`) を保存
+- **推論**: 動画 + checkpoint → フレームごとの `K` 分割確率 `p` を推定し、動画/CSVへ出力
+
+---
+
+### 重要なデータ仕様（共通）
+学習/推論で扱うテンソルは以下が前提です。
+
+- **`X`**: `[N, T, Nmax, F]`（float32）
+  - `T`: 過去フレーム長（入力系列長）
+  - `Nmax`: 1フレーム内で使う最大人数（近い順に上位）
+  - `F`: 1人あたりの特徴量次元
+- **`M`**: `[N, T, Nmax]`（bool）
+  - `True` の場所だけが有効人物
+- **`y`**: `[N, K]`（float32）
+  - 未来 `H` フレームの占有/リスクから作る **soft label**（`sum(y)=1`）
+
+特徴量 `F` は以下（実装に準拠）です。
+
+- `root(3) + dir(3) + dist(1) + ttc(1)`（※vel/speed は特徴量から除外）
+- `+ ego(2)`（`use_ego_motion && ego_as_feature` のとき）
+- `+ pose(J3)`（`J*3` のフラット 3D 擬似骨格）
+- `+ dpose(J3)`（`use_pose_delta` のとき）
+- `+ conf(J)`（キーポイント信頼度）
+
+---
+
+### ルート直下（`predict_area/`）
+- **`pyproject.toml`**
+  - **役割**: 依存関係（`torch`, `opencv-python`, `ultralytics`, `numpy` など）とPython要件を定義。
+- **`uv.lock`**
+  - **役割**: `uv` 用ロックファイル（環境再現）。
+- **`README.md`**
+  - **役割**: プロジェクト説明（現状は空）。
+- **`yolov8n-pose.pt`**
+  - **役割**: YOLO Pose の重み（前処理/推論で使用）。
+- **`checkpoints/`**
+  - **役割**: DepthAnythingV2 の重み置き場（例: `depth_anything_v2_vits.pth`）。
+- **`data/`**
+  - **役割**: 入力動画データ置き場（例: `train_data/*.mp4`）。
+- **`npz/`**
+  - **役割**: 前処理出力（学習用 `.npz`）置き場の例。
+- **`Depth-Anything-V2/`**
+  - **役割**: DepthAnythingV2 の公式実装を同梱した外部コード。
+  - **本プロジェクトからの主な参照点**: `src/preprocess/depth_anything_v2.py` が `depth_anything_v2.dpt.DepthAnythingV2` を import して推論します。
+  - **注記**: 同梱ディレクトリ配下の各ファイル詳細は upstream の `README.md` を参照するのが推奨です。
+
+---
+
+### `src/config.py`
+- **役割**: 学習/前処理/推論で共有するハイパーパラメータ定義（`dataclass`）。
+- **主要クラス**
+  - **`SafetyConfig`**: bin数 `K`、入力長 `T`、未来長 `H`、最大人数 `Nmax`、距離閾値 `D`、YOLO設定、Depth設定、学習設定などを保持。
+    - **重要**: 人物選別の距離閾値は `D`（m）。
+    - **Depth（新）**:
+      - `depth_mode: "bbox" | "midas" | "metric"`
+      - `depth_anything_metric_dataset: "hypersim" | "vkitti"`（絶対深度モデル種別）
+      - `depth_anything_max_depth`（hypersim推奨20, vkitti推奨80）
+      - `depth_anything_ckpt`（checkpointパス。未指定なら命名規則から自動）
+    - **モデル設定（新）**: `SafetyNet` の構成（GRU / TransformerEncoder など）もここで切り替える。
+      - `temporal_model`: `"gru"` or `"transformer"`（時系列エンコーダの種類）
+      - `emb_dim`: 人物特徴を埋め込みに落とす次元（E）
+      - **GRU系**: `rnn_hidden`, `rnn_layers`
+      - **Transformer系**: `tf_layers`, `tf_nhead`, `tf_ff`, `tf_dropout`, `tf_norm_first`
+- **主要関数**
+  - **`save_config(path, cfg)`**: `SafetyConfig` を YAML に保存。
+  - **`load_config(path)`**: YAML から `SafetyConfig` を復元。
+
+---
+
+### 絶対深度（meters）でDepth-Anything-V2を使う方法（要checkpoint）
+`Depth-Anything-V2/metric_depth/README.md` にある **metric depth checkpoint** を `predict_area/checkpoints/` に置いてください。
+
+- **Indoor（推奨）**:
+  - `checkpoints/depth_anything_v2_metric_hypersim_<encoder>.pth`
+  - `<encoder>` は `vits|vitb|vitl`（例: `vitl`）
+- **Outdoor**:
+  - `checkpoints/depth_anything_v2_metric_vkitti_<encoder>.pth`
+
+`config.yaml` 例（Indoor）:
+
+```yaml
+depth_mode: metric
+depth_anything_encoder: vitl
+depth_anything_metric_dataset: hypersim
+depth_anything_max_depth: 20
+# depth_anything_ckpt: checkpoints/depth_anything_v2_metric_hypersim_vitl.pth  # 明示する場合
+```
+
+### モデル構成の切り替えと復元ルール（重要）
+このプロジェクトでは **学習時のモデル構成（GRU/Transformer 等）を推論時に確実に再現**できるように、checkpoint に「モデル引数」を保存してあります。
+
+- **学習時**（`src/train.py`）:
+  - `SafetyConfig` から `model_kwargs`（例: `{"temporal": "transformer", "emb_dim": 128, ...}`）を組み立てて `SafetyNet(..., **model_kwargs)` を作る。
+  - checkpoint に `model_kwargs` を保存する（後述）。
+- **推論時**（`src/infer/model_io.py`）:
+  - checkpoint 内に `model_kwargs` があれば **それを最優先**して `SafetyNet` を構築する（学習と完全一致）。
+  - 古い checkpoint などで `model_kwargs` が無い場合は、`SafetyConfig` から `model_kwargs` 相当を組み立ててフォールバックする。
+
+これにより、**推論側の `config.yaml` を間違えても、checkpoint に保存された構成が優先**され、学習時と異なるモデルでロードしてしまう事故を避けられます。
+
+#### 設定例（`config.yaml`）
+GRU / Transformer は `SafetyConfig.temporal_model` で切り替えます（学習で保存された checkpoint がある場合、推論は checkpoint 側の `model_kwargs` が優先されます）。
+
+**GRU（デフォルト）例**:
+
+```yaml
+temporal_model: gru
+emb_dim: 128
+rnn_hidden: 256
+rnn_layers: 2
+```
+
+**TransformerEncoder 例**:
+
+```yaml
+temporal_model: transformer
+emb_dim: 128
+tf_layers: 2
+tf_nhead: 4
+tf_ff: 512
+tf_dropout: 0.1
+tf_norm_first: true
+```
+
+**注意点**:
+- Transformer の場合、`emb_dim % tf_nhead == 0` が必須です（一致しないとモデル生成時に例外）。
+- `run_inference()` の入力系列長 `T` は固定長運用（rolling buffer が `T` 溜まったら推論）です。
+
+---
+
+### `src/dataset.py`
+- **役割**: `.npz` を複数束ねて学習できる `torch.utils.data.Dataset`。
+- **主要クラス**
+  - **`MultiNpzSafetyDataset(npz_paths)`**
+    - **入力**: `.npz` のパス配列（各npzは `X/M/y` を含む）
+    - **挙動**: ファイルごとに長さを持ち、`__getitem__` で該当ファイルだけ lazy load（直前ファイルはキャッシュ）
+    - **`__getitem__(idx)` 出力**: `(X[T,Nmax,F], M[T,Nmax], y[K])`（いずれも `torch.Tensor`）
+- **主要関数**
+  - **`list_npz_in_dir(npz_dir)`**: ディレクトリ配下の `.npz` を再帰探索してソートして返す。
+  - **`read_manifest(manifest_path)`**: `manifest.txt`（1行1パス）から `.npz` パス一覧を読む。
+
+---
+
+### `src/model.py`
+- **役割**: 人物集合を時系列で集約し、横方向 `K` 分割の確率を出すモデル（PyTorch）。
+- **主要クラス**
+  - **`PersonEncoder(in_dim, emb_dim=128)`**
+    - **入力**: `x[B,T,N,F]`
+    - **出力**: `e[B,T,N,E]`
+  - **`AttentionPool(emb_dim=128)`**
+    - **入力**: `e[B,T,N,E]`, `m[B,T,N]`（無効人物をmask）
+    - **出力**: `s[B,T,E]`（人物集合を attention で集約）
+  - **`TemporalEncoder(temporal, emb_dim, ...)`（新）**
+    - **役割**: 時系列エンコーダを **GRU** と **TransformerEncoder** で切り替える薄いラッパ。
+    - **入力**: `s[B,T,E]`
+    - **出力**: `h[B,D]`（最後の時刻の表現）
+      - GRU のとき `D=rnn_hidden`
+      - Transformer のとき `D=emb_dim`
+    - **注意**: Transformer の場合は位置エンコーディング（sinusoidal）を加える。
+  - **`SafetyNet(in_dim, K, emb_dim=128, temporal="gru", ...)`**
+    - **入力**: `X[B,T,N,F]`, `M[B,T,N]`
+    - **出力**: `p[B,K]`（softmax確率）, `logits[B,K]`
+    - **内部構成（概要）**:
+      - `PersonEncoder`: `F -> E`
+      - `AttentionPool`: `N` 人を `E` 次元で集約（mask対応）
+      - `TemporalEncoder`: `T` を集約して 1ベクトル化（GRU/Transformer切替）
+      - `head`: `D -> K`
+
+---
+
+### `src/train.py`
+- **役割**: `.npz`（単体/ディレクトリ/manifest）から学習し、checkpoint を保存するCLI。
+- **主要関数**
+  - **`set_seed(seed)`**: 乱数シード固定（`random/numpy/torch`）。
+  - **`soft_ce_loss(logits, q)`**: soft label `q[B,K]` に対するクロスエントロピー。
+  - **`resolve_npz_paths(train_npz, npz_dir, manifest)`**: 入力npzの解決（優先度: `--train-npz` > `--manifest` > `--npz-dir`）。`--train-npz`/`--npz-dir` は複数指定でき、`.npz` とディレクトリ（再帰展開）を混在可能。
+  - **`default_num_workers()`**: macOSは `0`（安定性優先）それ以外は `2`。
+  - **`main()`**:
+    - **主な引数**: `--train-npz/--npz-dir/--manifest`, `--config`, `--out-ckpt`, `--save-config`, `--num-workers`, `--pin-memory`
+    - **保存物**: `torch.save` する辞書（推論で必要）
+      - `model_state`: `state_dict()`
+      - `cfg`: `SafetyConfig` の中身（参考/再現用）
+      - `in_dim`: 特徴次元 `F`
+      - `K`: 出力bin数
+      - `model_kwargs`（新）: 学習時に `SafetyNet` を構築した引数（`temporal` など）
+      - `npz_files`: 学習に使った `.npz` 一覧
+    - **重要**: `model_kwargs` があることで、推論は **学習時のモデル構成を自動復元**できる。
+
+---
+
+### `src/preprocess/`（分割版・推奨）
+#### `src/preprocess/cli.py`
+- **役割**: 前処理CLI（動画ディレクトリ→複数npz生成）。
+- **主な引数**: `--video-dir`, `--out-dir`, `--config`, `--save-config`, `--skip-existing`
+- **内部呼び出し**: `preprocess.pipeline.preprocess_one_video()` を各動画へ適用し、最後に `manifest.txt` を生成。
+
+#### `src/preprocess/pipeline.py`
+- **役割**: 前処理の本体（フレーム処理 + バッファ化 + npz化）。
+- **主要関数**
+  - **`list_videos(video_dir)`**: 対応拡張子の動画一覧を返す。
+  - **`preprocess_one_video(video_path, out_dir, yolo_pose_model, cfg, skip_existing=False)`**
+    - **入出力**: 1動画→1 `*.npz`（失敗時 `None`）
+    - **中核**:
+      - `yolo_track_pose()` で人物 bbox/追跡ID/COCO17 keypoints を取得
+      - `EgoMotionTracker.update()` で背景オプティカルフローから ego motion を推定
+      - `depth_mode` が `"midas"` のとき `DepthAnythingV2DepthEstimator`（相対深度）を使い、bbox近似でスケール合わせして `root(x,y,z)` を推定（失敗時は bbox 推定へフォールバック）
+      - `depth_mode` が `"metric"` のとき `DepthAnythingV2DepthEstimator`（絶対深度）を使い、**meters深度**から `root(x,y,z)` を推定（失敗時は bbox 推定へフォールバック）
+      - `build_npz_from_video_buffers()` で `X/M/y` を保存
+  - **`preprocess_video_dir(video_dir, out_dir, cfg, skip_existing=False)`**: 複数動画をまとめて処理して `.npz` パス一覧を返す。
+- **主要引数（cfg）**: `T/H/Nmax/D`, `use_pose_delta`, `use_ego_motion`, `ego_as_feature`, `ego_normalize`, `depth_mode`, YOLO関連
+
+#### `src/preprocess/yolo_pose.py`
+- **役割**: Ultralytics YOLO の tracking + pose を薄くラップ。
+- **主要関数**
+  - **`yolo_track_pose(model, frame_bgr, conf, iou, tracker, device)`**
+    - **戻り値形状**:
+      - `boxes_xyxy[N,4]`, `ids[N]`, `confs[N]`, `kpts_xy[N,17,2]`, `kpts_conf[N,17]`
+
+#### `src/preprocess/camera.py`
+- **役割**: 簡易カメラモデル（FOV→内部パラメータ、bbox/2D→擬似3D）。
+- **主要関数**
+  - **`camera_intrinsics_from_fov(h, w, fov_y_deg)`**: `(fx,fy,cx,cy)` を返す。
+  - **`estimate_root_xyz_from_bbox(box_xyxy, fx,fy,cx,cy, assumed_person_height_m, eps)`**
+    - bbox高さから `z` を推定し、中心 `(u,v)` を pinhole で `x,y` に戻して `root[x,y,z]` を返す（単純近似）。
+  - **`pseudo3d_pose_from_keypoints(kpts_xy, kpts_conf, fx,fy,cx,cy, z, kp_conf_thresh)`**
+    - 2D keypoints を固定深度 `z` 上に投影して `pose_flat[J*3]` と `conf[J]` を返す。
+
+#### `src/preprocess/ego.py`
+- **役割**: 人物領域を避けた背景特徴点の追跡から ego motion（画素移動）を推定。
+- **主要クラス**
+  - **`EgoMotionTracker.update(frame, exclude_boxes)`**: `(ego_vx, ego_vy)` を返す。
+
+#### `src/preprocess/labels.py`
+- **役割**: 未来 `H` フレームの人物 `x,z` から soft label `y[K]` を生成。
+- **主要関数**
+  - **`bin_index(x, x_min, x_max, K)`**: `x` をbinへ量子化。
+  - **`compute_soft_label_from_future_xz(future_people_xz, K, x_min, x_max, alpha_depth, gamma_time, beta_risk)`**
+    - `R[k]`（リスク蓄積）→ `S=exp(-beta*R)` → `q = S/sum(S)`。
+
+#### `src/preprocess/build_npz.py`
+- **役割**: 前処理バッファ（フレーム毎の人物状態）から学習用 `X/M/y` を構築して `.npz` 保存。
+- **主要関数**
+  - **`build_npz_from_video_buffers(frames_state, frames_ego, fps, width, height, cfg, out_npz_path, video_path)`**
+    - **入力**:
+      - `frames_state`: 各フレーム `tid -> {"root","pose","conf"}`
+      - `frames_ego`: 各フレーム `(ego_vx, ego_vy)`（pixel/frame）
+    - **出力**: `.npz` に `X/M/y` とメタ（`video/fps/cfg`）を保存
+    - **重要（cfg）**: 距離閾値は `D`
+
+#### `src/preprocess/depth_anything_v2.py`
+- **役割**: DepthAnythingV2 を本プロジェクトに接続するアダプタ。
+- **主要クラス**
+  - **`DepthAnythingV2DepthEstimator(cfg)`**
+    - **主な設定（cfg_getで任意）**:
+      - `depth_anything_encoder`（vits/vitb/vitl/vitg）
+      - `depth_anything_ckpt`（checkpoint path）
+      - `depth_anything_calibrate_to_meters`（相対深度→mスケール合わせ）
+    - **主要メソッド**:
+      - `infer_depth_map(frame_bgr) -> depth_map[H,W]`
+      - `infer_and_calibrate(...) -> depth_map`（bbox由来zでスケールをEMA更新）
+      - `root_xyz_from_bbox(...) -> root[3]`（depth優先、失敗時はbbox推定へ）
+- **注記**: DepthAnything 本体は `Depth-Anything-V2/` 同梱コードに依存します。
+
+---
+
+### `src/infer/`（分割版・推奨）
+#### `src/infer/cli.py`
+- **役割**: 推論CLI（動画 + checkpoint → overlay動画/CSV）。
+- **主な引数**: `--video`, `--ckpt`, `--config`, `--out-video`, `--out-csv`, `--show`, `--max-frames`
+- **内部呼び出し**:
+  - `model_io.load_safetynet()` でモデル/次元/K/deviceを復元
+  - `pipeline.run_inference()` で推論ループ
+
+#### `src/infer/model_io.py`
+- **役割**: checkpoint のロードを分離。
+- **主要関数**
+  - **`load_safetynet(ckpt_path, cfg) -> (model, in_dim, K, device)`**
+    - **復元ルール**:
+      - checkpoint に `model_kwargs` があればそれを使用（最優先）
+      - 無ければ `SafetyConfig` から `model_kwargs` を生成してフォールバック
+
+#### `src/infer/features.py`
+- **役割**: 推論時に rolling buffer（長さ `T`）から `X/M` を組み立てる（前処理と仕様一致が必須）。
+- **主要関数**
+  - **`build_feature_tensor(frames_state, frames_ego, fps, width, height, cfg, in_dim_expected)`**
+    - **出力**: `X[1,T,Nmax,F]`, `M[1,T,Nmax]`
+    - **注意**: `F != in_dim_expected` の場合は例外（cfg不一致）。
+
+#### `src/infer/pipeline.py`
+- **役割**: 推論ループ本体（YOLO + ego + depth + 特徴量→SafetyNet→出力）。
+- **主要関数**
+  - **`run_inference(video_path, ckpt_in_dim, K, cfg, device, safety_model, out_video="", out_csv="", show=False, max_frames=0)`**
+    - CLIが直接呼ぶエントリポイント（モデルは外でロード済み）
+  - **`run_infer(video_path, ckpt_path, cfg, ...)`**
+    - 互換用（この関数内で `load_safetynet()` を呼んでから `run_inference` を呼ぶ）
+    - **注意**: モデル構築ロジックは `infer/model_io.py` に一本化されている（GRU/Transformer切替を含む）
+
+#### `src/infer/viz.py`
+- **役割**: 予測確率の簡易可視化（バー表示）。
+- **主要関数**
+  - `draw_prob_bar(frame, p, ...)`
+  - `overlay_prediction(frame, p)`
+
+#### `src/infer/outputs.py`
+- **役割**: 出力（動画writer / CSV）を開閉する小物ユーティリティ。
+- **主要クラス/関数**
+  - `OutputWriters(writer, csv_f).close(show)`
+  - `open_video_writer(out_video, fps, size_wh)`
+  - `open_csv(out_csv, K)`
+
+---
+
+
