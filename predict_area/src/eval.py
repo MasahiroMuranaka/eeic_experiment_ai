@@ -260,7 +260,12 @@ def eval_from_npz_with_model(
             emd_bins = torch.abs(cdf_diff).sum(dim=-1)
             emd_x = emd_bins * float(dx)
 
-            top1 = (torch.argmax(q, dim=-1) == torch.argmax(p, dim=-1)).float()
+            # top1 = (torch.argmax(q, dim=-1) == torch.argmax(p, dim=-1)).float()
+            
+            q_max = q.max(dim=-1).values # [B]
+            pre_ind = torch.argmax(p, dim=-1) # [B]
+            q_at_pred = q.gather(dim=-1, index=pre_ind.unsqueeze(-1)).squeeze(-1) #[B]
+            top1 = (torch.abs(q_max - q_at_pred) < 1e-3).float()
 
             eq = (q * ks).sum(dim=-1)
             ep = (p * ks).sum(dim=-1)
