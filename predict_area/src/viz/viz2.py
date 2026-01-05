@@ -25,8 +25,13 @@ def load_data_map(path: str) -> Dict[int, np.ndarray]:
             # 一番左はフレーム番号を想定
             data = np.loadtxt(path, delimiter=',', skiprows=1)
             if data.ndim == 1: data = data[np.newaxis, :]
-            for i, row in enumerate(data):
-                mapping[i] = row[1:]
+            for row in data:
+                # row[0] が frame 番号。ファイルによっては float なので int 化する。
+                try:
+                    frame_idx = int(row[0])
+                except Exception:
+                    continue
+                mapping[frame_idx] = row[1:]
 
         elif ext == '.npy':
             data = np.load(path)
@@ -107,7 +112,7 @@ def create_viz_videos(video_path, model_path, answer_path):
     
     # 2. 動画or画像準備
     use_video = True
-    frames = []
+    image_paths = []
     if os.path.isfile(video_path):
         cap = cv2.VideoCapture(video_path)
         if not cap.isOpened():
@@ -124,13 +129,16 @@ def create_viz_videos(video_path, model_path, answer_path):
         image_paths = glob.glob(os.path.join(video_path, "*.jpg"))
         # 順序が昇順になるようにソート
         image_paths = sorted(image_paths, key=lambda p: int(os.path.splitext(os.path.basename(p))[0]))
+        if len(image_paths) == 0:
+            raise IOError(f"No .jpg files found in directory: {video_path}")
 
-        for path in image_paths:
-            frames.append(cv2.imread(path))
+        first = cv2.imread(image_paths[0])
+        if first is None:
+            raise IOError(f"Failed to read image: {image_paths[0]}")
 
         fps = 15.0
-        w = frames[0].shape[1]
-        h = frames[0].shape[0]
+        w = first.shape[1]
+        h = first.shape[0]
 
         base = os.path.basename(video_path)
     
@@ -171,10 +179,12 @@ def create_viz_videos(video_path, model_path, answer_path):
             if not ret:
                 break
         else:
-            if frame_idx < len(frames) -  1:
-                frame = frames[frame_idx]
-            else:
+            if frame_idx >= len(image_paths):
                 break
+            frame = cv2.imread(image_paths[frame_idx])
+            if frame is None:
+                frame_idx += 1
+                continue
             
         frame_m = frame.copy()
         frame_a = frame.copy()
